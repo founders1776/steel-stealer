@@ -1,0 +1,26 @@
+progress.json
+output/
+storage_state.json
+browser_data/
+debug/
+__pycache__/
+*.pyc
+.venv/
+.env
+.DS_Store
+shopify_token.json
+images/
+images_raw/
+thumbnails_review/
+review_sheets/
+temp_output_*.json
+VaM Watermark.png
+full_discovery_progress.json
+catalog_progress.json
+stock_check_progress.json
+image_progress.json
+steel_city_image_progress.json
+replace_progress.json
+flag_results.json
+visual_review_results.json
+image_urls.json

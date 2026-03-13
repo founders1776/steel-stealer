@@ -1,0 +1,53 @@
+name: Sync Stock & Prices
+
+on:
+  schedule:
+    - cron: '0 6,18 * * *'  # Every 12 hours (6am, 6pm UTC)
+  workflow_dispatch: {}       # Manual trigger button
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: pip install selenium undetected-chromedriver requests openpyxl
+
+      - name: Run sync
+        id: sync
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          CI: 'true'
+        run: python sync_stock_prices.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add product_names.json sync_log.json
+          git diff --cached --quiet || git commit -m "Auto-sync: stock/price updates"
+          git push
+
+      - name: Send email summary
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Steel Stealer Sync Report"
+          to: ${{ secrets.EMAIL_TO }}
+          from: ${{ secrets.EMAIL_USERNAME }}
+          body: ${{ steps.sync.outputs.summary }}

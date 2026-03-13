@@ -1,0 +1,171 @@
+[
+  {
+    "timestamp": "2026-03-12T21:13:34.378916+00:00",
+    "dry_run": true,
+    "drafted": [
+      "140",
+      "1001",
+      "1002",
+      "1003"
+    ],
+    "activated": [],
+    "price_updated": [],
+    "errors": [
+      {
+        "sku": "09-75300-01+",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "1814HG",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "040033",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "09-75430-17+",
+        "error": "no_api_data"
+      }
+    ],
+    "total_checked": 1128
+  },
+  {
+    "timestamp": "2026-03-13T02:21:33.908936+00:00",
+    "dry_run": true,
+    "drafted": [
+      "37270",
+      "140",
+      "325",
+      "200",
+      "PUMPKINSPICE",
+      "118",
+      "FRESH&CLEAN",
+      "304",
+      "1001",
+      "1002",
+      "1003",
+      "NLA11/88",
+      "12.6KTSWA400SE",
+      "203",
+      "4370561",
+      "5006",
+      "148",
+      "KC99PDDUZV06"
+    ],
+    "activated": [],
+    "price_updated": [],
+    "errors": [
+      {
+        "sku": "1SN0220001+",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "09-75300-01+",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "AXTN4+16BFY",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "1814HG",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "040033",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "86139590",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "86430940",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "AXTS3+12KFYY",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "87601+008+5000N",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "09-75430-17+",
+        "error": "no_api_data"
+      }
+    ],
+    "total_checked": 7921
+  },
+  {
+    "timestamp": "2026-03-13T02:41:36.082117+00:00",
+    "dry_run": false,
+    "drafted": [
+      "37270",
+      "140",
+      "325",
+      "200",
+      "PUMPKINSPICE",
+      "118",
+      "FRESH&CLEAN",
+      "304",
+      "1001",
+      "1002",
+      "1003",
+      "NLA11/88",
+      "12.6KTSWA400SE",
+      "203",
+      "4370561",
+      "5006",
+      "148",
+      "KC99PDDUZV06"
+    ],
+    "activated": [],
+    "price_updated": [],
+    "errors": [
+      {
+        "sku": "1SN0220001+",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "09-75300-01+",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "AXTN4+16BFY",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "1814HG",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "040033",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "86139590",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "86430940",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "AXTS3+12KFYY",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "87601+008+5000N",
+        "error": "no_api_data"
+      },
+      {
+        "sku": "09-75430-17+",
+        "error": "no_api_data"
+      }
+    ],
+    "total_checked": 7921
+  }
+]
