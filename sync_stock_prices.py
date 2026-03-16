@@ -26,8 +26,6 @@ from pathlib import Path
 
 import requests
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import undetected_chromedriver as uc
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -46,6 +44,7 @@ SYNC_LOG_FILE = BASE_DIR / "sync_log.json"
 SYNC_PROGRESS_FILE = BASE_DIR / "sync_progress.json"
 BULK_IMPORT_PROGRESS_FILE = BASE_DIR / "bulk_import_progress.json"
 PRICE_LOCKS_FILE = BASE_DIR / "price_locks.json"
+COMPETITOR_PRICES_FILE = BASE_DIR / "competitor_prices.json"
 
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
@@ -108,81 +107,89 @@ def parse_price(price_str):
     return float(match.group()) if match else None
 
 
+# ── Competitive pricing ────────────────────────────────────────────────────
+
+SHOPIFY_FEE_RATE = 0.029
+SHOPIFY_FEE_FIXED = 0.30
+
+UNDERCUT_TIERS = [
+    (20,   0.50),
+    (50,   1.00),
+    (100,  2.00),
+    (300,  5.00),
+    (float("inf"), 10.00),
+]
+
+
+def calculate_break_even(cost):
+    """Break-even = dealer cost + Shopify fees (2.9% + $0.30)."""
+    return (cost + SHOPIFY_FEE_FIXED) / (1 - SHOPIFY_FEE_RATE)
+
+
+def get_undercut(competitor_avg):
+    for max_price, undercut in UNDERCUT_TIERS:
+        if competitor_avg < max_price:
+            return undercut
+    return UNDERCUT_TIERS[-1][1]
+
+
+def get_best_price(sku, dealer_cost, competitor_prices):
+    """Return best price: beat lowest competitor by $1 if profitable, else avg undercut, else markup."""
+    markup_price = calculate_retail_price(dealer_cost)
+
+    comp_data = competitor_prices.get(sku)
+    if not comp_data or comp_data.get("num_competitors", 0) == 0:
+        return markup_price, "markup"
+
+    break_even = calculate_break_even(dealer_cost)
+    competitor_avg = comp_data["avg_price"]
+    competitor_min = comp_data.get("min_price", competitor_avg)
+
+    # Try to beat lowest competitor by $1
+    target_min = charm_price(competitor_min - 1.00)
+    target_min = max(target_min, MIN_PRICE)
+    if target_min >= break_even:
+        return target_min, "competitor"
+
+    # Can't beat lowest — try average with tiered undercut
+    undercut = get_undercut(competitor_avg)
+    target_avg = charm_price(competitor_avg - undercut)
+    target_avg = max(target_avg, MIN_PRICE)
+    if target_avg >= break_even:
+        return target_avg, "competitor"
+
+    return markup_price, "markup"
+
+
 # ── Browser helpers (from check_stock.py) ───────────────────────────────────
 
 def create_driver():
     options = uc.ChromeOptions()
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    # Use temp profile in CI (no persistent browser_data)
+    options.add_argument("--no-sandbox")
     if os.environ.get("CI"):
         options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
-    else:
-        options.add_argument(f"--user-data-dir={BASE_DIR / 'browser_data'}")
     return uc.Chrome(options=options, headless=bool(os.environ.get("CI")), version_main=145)
 
 
-def wait_for_cloudflare(driver, max_wait=120):
-    if "just a moment" not in driver.title.lower():
-        return
-    log.info("Cloudflare challenge detected — waiting...")
-    for i in range(max_wait // 2):
-        time.sleep(2)
-        if "just a moment" not in driver.title.lower():
-            log.info(f"Cloudflare resolved after ~{(i+1)*2}s")
-            time.sleep(2)
-            return
-        if i % 15 == 14:
-            log.info(f"Still waiting on Cloudflare... ({(i+1)*2}s)")
-    raise TimeoutError("Cloudflare challenge not resolved.")
-
-
 def login(driver):
-    log.info("Navigating to Steel City Vacuum...")
+    log.info("Navigating to Steel City login page...")
+    driver.get(f"{CONFIG['base_url']}/a/s/")
+    time.sleep(6)
+
+    driver.find_element(By.ID, "scv_customer_number").clear()
+    driver.find_element(By.ID, "scv_customer_number").send_keys(CONFIG["account"])
+    driver.find_element(By.ID, "username_login_box").clear()
+    driver.find_element(By.ID, "username_login_box").send_keys(CONFIG["user_id"])
+    driver.find_element(By.ID, "password_login").clear()
+    driver.find_element(By.ID, "password_login").send_keys(CONFIG["password"])
+    driver.find_element(By.NAME, "loginSubmit").click()
+    time.sleep(5)
+    log.info(f"Logged in. URL: {driver.current_url}")
+
+    # Navigate to base URL so API calls work
     driver.get(CONFIG["base_url"])
     time.sleep(3)
-    wait_for_cloudflare(driver)
-
-    try:
-        nav = driver.find_element(By.ID, "main-nav")
-        if "notlogged" not in (nav.get_attribute("class") or "").lower():
-            log.info("Already logged in!")
-            return
-    except Exception:
-        pass
-
-    log.info("Logging in...")
-    try:
-        driver.find_element(By.CSS_SELECTOR, "a.nav-login-btn").click()
-        time.sleep(1)
-    except Exception:
-        pass
-
-    wait = WebDriverWait(driver, 10)
-    customer_field = wait.until(EC.visibility_of_element_located((By.ID, "scvCustomerNumber")))
-    for field_id, value in [
-        ("scvCustomerNumber", CONFIG["account"]),
-        ("userNameBox", CONFIG["user_id"]),
-        ("password", CONFIG["password"]),
-    ]:
-        el = driver.find_element(By.ID, field_id) if field_id != "scvCustomerNumber" else customer_field
-        el.clear()
-        for ch in value:
-            el.send_keys(ch)
-            time.sleep(random.uniform(0.02, 0.08))
-        time.sleep(random.uniform(0.3, 0.6))
-
-    try:
-        driver.find_element(By.CSS_SELECTOR, "a.login-btn").click()
-    except Exception:
-        driver.execute_script("submitLoginForm()")
-
-    time.sleep(5)
-    wait_for_cloudflare(driver)
-    log.info("Login complete.")
 
 
 def api_product_info_batch(driver, part_ids):
@@ -216,6 +223,39 @@ def api_product_info_batch(driver, part_ids):
     except Exception as e:
         log.debug(f"Batch API failed for {len(part_ids)} parts: {e}")
     return {pid: None for pid in part_ids}
+
+
+def scrape_real_stock_batch(driver, skus):
+    """Fetch product pages and extract real qty from server-rendered var qtyoh."""
+    try:
+        result = driver.execute_async_script("""
+            var skus = arguments[0];
+            var callback = arguments[arguments.length - 1];
+            var results = {};
+            var done = 0;
+            skus.forEach(function(sku) {
+                $.ajax({
+                    type: 'GET',
+                    url: 'a/s/p/' + encodeURIComponent(sku),
+                    success: function(html) {
+                        var match = html.match(/var\\s+qtyoh\\s*=\\s*'([^']*)'/);
+                        results[sku] = match ? match[1] : null;
+                        done++;
+                        if (done === skus.length) callback(JSON.stringify(results));
+                    },
+                    error: function() {
+                        results[sku] = null;
+                        done++;
+                        if (done === skus.length) callback(JSON.stringify(results));
+                    }
+                });
+            });
+        """, skus)
+        if result:
+            return json.loads(result)
+    except Exception as e:
+        log.debug(f"Batch page scrape failed for {len(skus)} SKUs: {e}")
+    return {sku: None for sku in skus}
 
 
 # ── Shopify API helpers ─────────────────────────────────────────────────────
@@ -313,6 +353,14 @@ def run_sync(driver, dry_run=False):
         if price_locks:
             log.info(f"Price-locked SKUs (MAP): {len(price_locks)}")
 
+    # Load competitor prices for competitive pricing
+    competitor_prices = {}
+    if COMPETITOR_PRICES_FILE.exists():
+        with open(COMPETITOR_PRICES_FILE) as f:
+            comp_data = json.load(f)
+        competitor_prices = comp_data.get("prices", {})
+        log.info(f"Competitor price data: {len(competitor_prices)} SKUs")
+
     # Load bulk import progress to identify OUR products (avoid touching pre-existing ones)
     our_product_ids = set()
     if BULK_IMPORT_PROGRESS_FILE.exists():
@@ -351,7 +399,9 @@ def run_sync(driver, dry_run=False):
         batch = remaining[i:i + BATCH_SIZE]
         batch_skus = [sku for _, sku, _ in batch]
 
+        # Fetch API data (for prices) and real stock (from product pages) in sequence
         results = api_product_info_batch(driver, batch_skus)
+        stock_results = scrape_real_stock_batch(driver, batch_skus)
 
         for key, sku, product in batch:
             api_data = results.get(sku)
@@ -359,7 +409,7 @@ def run_sync(driver, dry_run=False):
             product_id = shop_info["product_id"]
             variant_id = shop_info["variant_id"]
 
-            old_in_stock = product.get("in_stock", "1")
+            old_qty = product.get("qty_on_hand")
             old_cost = parse_price(product.get("price"))
 
             # Get new values from API
@@ -368,57 +418,79 @@ def run_sync(driver, dry_run=False):
                 progress["checked_skus"].append(sku)
                 continue
 
-            new_in_stock = api_data.get("in_stock", "1")
             new_cost_raw = api_data.get("price", "")
             new_cost = parse_price(new_cost_raw)
 
-            # ── Stock status changes ──
-            if old_in_stock == "1" and new_in_stock == "0":
-                # In stock → out of stock: draft the product
-                log.info(f"  DRAFT: {sku} ({product.get('clean_name', '')[:40]})")
+            # Real stock from product page (qtyoh)
+            qtyoh_raw = stock_results.get(sku)
+            if qtyoh_raw is None:
+                # Page scrape failed — skip stock check for this SKU
+                changes["errors"].append({"sku": sku, "error": "no_stock_data"})
+                progress["checked_skus"].append(sku)
+                continue
+            new_qty = int(qtyoh_raw)
+
+            # ── Stock status changes (based on real qty from product page) ──
+            was_in_stock = old_qty is None or old_qty > 0  # assume in-stock if no prior data
+            now_in_stock = new_qty > 0
+
+            if was_in_stock and not now_in_stock:
+                # Was available → now out of stock: draft the product
+                log.info(f"  DRAFT: {sku} (qty=0) ({product.get('clean_name', '')[:40]})")
                 if not dry_run:
                     ok = set_product_status(product_id, "draft")
                     if not ok:
                         changes["errors"].append({"sku": sku, "error": "draft_failed"})
                     time.sleep(0.55)
                 changes["drafted"].append(sku)
-                products[key]["in_stock"] = "0"
 
-            elif old_in_stock == "0" and new_in_stock == "1":
-                # Out of stock → back in stock: reactivate
-                log.info(f"  ACTIVATE: {sku} ({product.get('clean_name', '')[:40]})")
+            elif not was_in_stock and now_in_stock:
+                # Was out → now back in stock: reactivate
+                log.info(f"  ACTIVATE: {sku} (qty={new_qty}) ({product.get('clean_name', '')[:40]})")
                 if not dry_run:
                     ok = set_product_status(product_id, "active")
                     if not ok:
                         changes["errors"].append({"sku": sku, "error": "activate_failed"})
                     time.sleep(0.55)
                 changes["activated"].append(sku)
-                products[key]["in_stock"] = "1"
 
-            # ── Price changes (increase only, skip MAP-locked SKUs) ──
-            if old_cost is not None and new_cost is not None and new_cost > old_cost and sku not in price_locks:
-                new_retail = calculate_retail_price(new_cost)
+            # Always store real qty for next run's comparison
+            products[key]["qty_on_hand"] = new_qty
+
+            # ── Price changes (competitor-aware, skip MAP-locked SKUs) ──
+            if new_cost is not None and sku not in price_locks:
+                # Use competitor-based price if available, else tiered markup
+                new_retail, price_method = get_best_price(sku, new_cost, competitor_prices)
                 old_retail_str = product.get("retail_price", "")
                 old_retail = parse_price(old_retail_str) or 0
 
-                log.info(f"  PRICE UP: {sku} cost ${old_cost:.2f}→${new_cost:.2f}, "
-                         f"retail ${old_retail:.2f}→${new_retail:.2f}")
+                # Update cost in product_names if it changed
+                cost_changed = old_cost is not None and abs(new_cost - old_cost) > 0.005
 
-                if not dry_run:
-                    ok = update_variant_price(variant_id, new_retail, new_cost)
-                    if not ok:
-                        changes["errors"].append({"sku": sku, "error": "price_update_failed"})
-                    time.sleep(0.55)
+                # Update price if retail changed or cost changed
+                price_changed = abs(new_retail - old_retail) >= 0.01
 
-                changes["price_updated"].append({
-                    "sku": sku,
-                    "old_cost": product.get("price", ""),
-                    "new_cost": f"${new_cost:.2f}",
-                    "old_retail": old_retail_str,
-                    "new_retail": f"${new_retail:.2f}",
-                })
-                products[key]["price"] = f"${new_cost:.2f}"
-                products[key]["retail_price"] = f"${new_retail:.2f}"
+                if cost_changed or price_changed:
+                    direction = "UP" if new_retail > old_retail else "DOWN" if new_retail < old_retail else "COST"
+                    log.info(f"  PRICE {direction}: {sku} cost ${old_cost or 0:.2f}→${new_cost:.2f}, "
+                             f"retail ${old_retail:.2f}→${new_retail:.2f} ({price_method})")
+
+                    if not dry_run:
+                        ok = update_variant_price(variant_id, new_retail, new_cost)
+                        if not ok:
+                            changes["errors"].append({"sku": sku, "error": "price_update_failed"})
+                        time.sleep(0.55)
+
+                    changes["price_updated"].append({
+                        "sku": sku,
+                        "old_cost": product.get("price", ""),
+                        "new_cost": f"${new_cost:.2f}",
+                        "old_retail": old_retail_str,
+                        "new_retail": f"${new_retail:.2f}",
+                        "method": price_method,
+                    })
+                    products[key]["price"] = f"${new_cost:.2f}"
+                    products[key]["retail_price"] = f"${new_retail:.2f}"
 
             progress["checked_skus"].append(sku)
 
