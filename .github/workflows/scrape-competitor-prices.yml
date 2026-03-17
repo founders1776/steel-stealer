@@ -1,0 +1,51 @@
+name: Scrape Competitor Prices (Weekly)
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # Every Sunday at 2am UTC
+  workflow_dispatch: {}   # Manual trigger button
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install requests ddgs playwright playwright-stealth
+
+      - name: Install Playwright browsers
+        run: playwright install chromium
+
+      - name: Scrape competitor prices
+        run: python scrape_competitor_prices.py
+
+      - name: Calculate competitive prices
+        run: python calculate_competitive_prices.py --dry-run
+
+      - name: Commit updated data
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add competitor_prices.json pricing_decisions.json competitor_price_progress.json
+          git diff --cached --quiet || git commit -m "Auto-scrape: weekly competitor price update"
+          git push
+
+      - name: Send email summary
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.zoho.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "Steel Stealer - Weekly Competitor Price Scrape"
+          to: ${{ secrets.EMAIL_TO }}
+          from: ${{ secrets.EMAIL_USERNAME }}
+          body: "Weekly competitor price scrape completed. Check pricing_decisions.json for results."
