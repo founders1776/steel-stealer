@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: pip install requests ddgs playwright playwright-stealth
@@ -26,14 +26,11 @@ jobs:
       - name: Scrape competitor prices
         run: python scrape_competitor_prices.py
 
-      - name: Calculate competitive prices
-        run: python calculate_competitive_prices.py --dry-run
-
-      - name: Commit updated data
+      - name: Commit updated competitor data
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add competitor_prices.json pricing_decisions.json competitor_price_progress.json
+          git add competitor_prices.json competitor_price_progress.json
           git diff --cached --quiet || git commit -m "Auto-scrape: weekly competitor price update"
           git push
 
@@ -46,6 +43,15 @@ jobs:
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: "Steel Stealer - Weekly Competitor Price Scrape"
-          to: ${{ secrets.EMAIL_TO }}
+          to: ${{ secrets.EMAIL_USERNAME }}
           from: ${{ secrets.EMAIL_USERNAME }}
           body: "Weekly competitor price scrape completed. Check pricing_decisions.json for results."
+
+      - name: Send phone notification
+        if: always()
+        run: |
+          curl -s \
+            -H "Title: Competitor Scrape ${{ job.status }}" \
+            -H "Priority: ${{ job.status == 'failure' && 'high' || 'default' }}" \
+            -d "Weekly competitor price scrape ${{ job.status }}." \
+            ntfy.sh/REDACTED_TOPIC

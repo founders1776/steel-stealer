@@ -43,6 +43,7 @@ SHOPIFY_MAP_FILE = BASE_DIR / "shopify_product_map.json"
 SYNC_LOG_FILE = BASE_DIR / "sync_log.json"
 SYNC_PROGRESS_FILE = BASE_DIR / "sync_progress.json"
 BULK_IMPORT_PROGRESS_FILE = BASE_DIR / "bulk_import_progress.json"
+MISSING_IMPORT_PROGRESS_FILE = BASE_DIR / "missing_import_progress.json"
 PRICE_LOCKS_FILE = BASE_DIR / "price_locks.json"
 COMPETITOR_PRICES_FILE = BASE_DIR / "competitor_prices.json"
 
@@ -141,9 +142,34 @@ def get_best_price(sku, dealer_cost, competitor_prices):
     if not comp_data or comp_data.get("num_competitors", 0) == 0:
         return markup_price, "markup"
 
+    # Filter out mismatched competitor entries (accessories, wrong models)
+    # Only keep prices within 0.5x-5x of our dealer cost, and where
+    # our SKU actually appears in the matched product's title or URL path
+    sku_lower = sku.lower()
+    sku_norm = re.sub(r'[\-\s\.]', '', sku).lower()
+    valid_prices = []
+    for domain, cdata in comp_data.get("competitors", {}).items():
+        if not cdata or not cdata.get("price"):
+            continue
+        # Price ratio check
+        ratio = cdata["price"] / dealer_cost if dealer_cost > 0 else 1
+        if not (0.50 <= ratio <= 5.0):
+            continue
+        # SKU presence check (title + URL path, not query string)
+        comp_title = (cdata.get("title") or "").lower()
+        comp_url = (cdata.get("url") or "").split("?")[0].lower()
+        comp_text = comp_title + " " + comp_url
+        comp_text_norm = re.sub(r'[\-\s\.]', '', comp_text)
+        if sku_lower not in comp_text and sku_norm not in comp_text_norm:
+            continue
+        valid_prices.append(cdata["price"])
+
+    if not valid_prices:
+        return markup_price, "markup"
+
     break_even = calculate_break_even(dealer_cost)
-    competitor_avg = comp_data["avg_price"]
-    competitor_min = comp_data.get("min_price", competitor_avg)
+    competitor_min = min(valid_prices)
+    competitor_avg = sum(valid_prices) / len(valid_prices)
 
     # Try to beat lowest competitor by $1
     target_min = charm_price(competitor_min - 1.00)
@@ -369,6 +395,18 @@ def run_sync(driver, dry_run=False):
         our_product_ids = {v["id"] for v in bulk_progress.values() if v.get("status") == "created"}
         log.info(f"Products we imported (from bulk_import_progress): {len(our_product_ids)}")
 
+    # Also include missing_import_progress.json (belt and suspenders)
+    if MISSING_IMPORT_PROGRESS_FILE.exists():
+        with open(MISSING_IMPORT_PROGRESS_FILE) as f:
+            missing_progress = json.load(f)
+        before = len(our_product_ids)
+        for v in missing_progress.get("uploaded", {}).values():
+            if v.get("status") == "created" and v.get("id"):
+                our_product_ids.add(v["id"])
+        added = len(our_product_ids) - before
+        if added:
+            log.info(f"  + {added} from missing_import_progress → {len(our_product_ids)} total")
+
     # Only sync SKUs that are in both product_names and shopify_map,
     # AND whose Shopify product_id is one we imported (not pre-existing)
     sync_skus = []
@@ -416,6 +454,22 @@ def run_sync(driver, dry_run=False):
             if not api_data or not api_data.get("name"):
                 changes["errors"].append({"sku": sku, "error": "no_api_data"})
                 progress["checked_skus"].append(sku)
+                continue
+
+            # ── NLA detection: draft products marked No Longer Available ──
+            api_name = (api_data.get("name") or "").upper()
+            api_desc = (api_data.get("description") or "").upper()
+            is_nla = "NLA" in api_name or "NLA" in api_desc or \
+                     "NO LONGER AVAILABLE" in api_name or "NO LONGER AVAILABLE" in api_desc
+            if is_nla:
+                log.info(f"  DRAFT (NLA): {sku} ({product.get('clean_name', '')[:40]})")
+                if not dry_run:
+                    set_product_status(product_id, "draft")
+                    time.sleep(0.55)
+                changes["drafted"].append(sku)
+                products[key]["in_stock"] = "0"
+                progress["checked_skus"].append(sku)
+                save_sync_progress(progress)
                 continue
 
             new_cost_raw = api_data.get("price", "")

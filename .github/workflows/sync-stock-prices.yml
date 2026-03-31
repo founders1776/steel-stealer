@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
       - name: Install Chrome
         uses: browser-actions/setup-chrome@v1
@@ -39,7 +39,7 @@ jobs:
           git diff --cached --quiet || git commit -m "Auto-sync: stock/price updates"
           git push
 
-      - name: Send email summary
+      - name: Send email report
         if: always()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -48,6 +48,16 @@ jobs:
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
           subject: "Steel Stealer Sync Report"
-          to: ${{ secrets.EMAIL_TO }}
+          to: ${{ secrets.EMAIL_USERNAME }}
           from: ${{ secrets.EMAIL_USERNAME }}
           body: ${{ steps.sync.outputs.summary }}
+
+      - name: Send phone notification
+        if: always()
+        run: |
+          curl -s \
+            -H "Title: Sync ${{ steps.sync.outcome }}" \
+            -H "Priority: ${{ steps.sync.outcome == 'failure' && 'high' || 'default' }}" \
+            -H "Tags: ${{ steps.sync.outcome == 'failure' && 'warning' || 'white_check_mark' }}" \
+            -d "Steel Stealer sync ${{ steps.sync.outcome }}. Check email for details." \
+            ntfy.sh/REDACTED_TOPIC
