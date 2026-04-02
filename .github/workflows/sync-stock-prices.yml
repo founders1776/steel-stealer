@@ -17,23 +17,20 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Chrome 130
-        id: chrome
+      - name: Install Chrome
         uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: '130'
 
       - name: Install dependencies
-        run: pip install setuptools selenium undetected-chromedriver requests openpyxl
+        run: |
+          pip install setuptools selenium undetected-chromedriver requests openpyxl
+          sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: Run sync
         id: sync
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
-          CI: 'true'
-          CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}
-        run: python sync_stock_prices.py
+        run: xvfb-run --auto-servernum python sync_stock_prices.py
 
       - name: Commit updated data
         run: |
