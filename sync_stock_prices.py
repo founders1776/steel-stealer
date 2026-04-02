@@ -214,9 +214,15 @@ def create_driver():
 def login(driver):
     log.info("Navigating to Steel City login page...")
     driver.get(f"{CONFIG['base_url']}/a/s/")
-    WebDriverWait(driver, 30).until(
-        EC.presence_of_element_located((By.ID, "scv_customer_number"))
-    )
+    try:
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "scv_customer_number"))
+        )
+    except Exception:
+        log.error(f"Login form not found. URL: {driver.current_url}")
+        log.error(f"Page title: {driver.title}")
+        log.error(f"Page source (first 2000 chars): {driver.page_source[:2000]}")
+        raise
 
     driver.find_element(By.ID, "scv_customer_number").clear()
     driver.find_element(By.ID, "scv_customer_number").send_keys(CONFIG["account"])
