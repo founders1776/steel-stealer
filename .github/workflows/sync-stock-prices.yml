@@ -17,11 +17,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Chrome
+      - name: Install Chrome 130
         uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: '130'
 
       - name: Install dependencies
-        run: pip install selenium requests openpyxl
+        run: pip install setuptools selenium undetected-chromedriver requests openpyxl
 
       - name: Run sync
         id: sync
