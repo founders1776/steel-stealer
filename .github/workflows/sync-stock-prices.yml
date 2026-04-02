@@ -21,7 +21,7 @@ jobs:
         uses: browser-actions/setup-chrome@v1
 
       - name: Install dependencies
-        run: pip install selenium undetected-chromedriver requests openpyxl
+        run: pip install setuptools selenium undetected-chromedriver requests openpyxl
 
       - name: Run sync
         id: sync
