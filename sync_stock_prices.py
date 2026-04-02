@@ -28,7 +28,12 @@ import requests
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import undetected_chromedriver as uc
+try:
+    import undetected_chromedriver as uc
+    HAS_UC = True
+except ImportError:
+    HAS_UC = False
+from selenium import webdriver
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -192,12 +197,18 @@ def get_best_price(sku, dealer_cost, competitor_prices):
 # ── Browser helpers (from check_stock.py) ───────────────────────────────────
 
 def create_driver():
-    options = uc.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    if os.environ.get("CI"):
+    if os.environ.get("CI") or not HAS_UC:
+        # Use plain Selenium in CI — no anti-bot bypass needed for Steel City
+        options = webdriver.ChromeOptions()
+        options.add_argument("--no-sandbox")
         options.add_argument("--headless=new")
         options.add_argument("--disable-dev-shm-usage")
-    return uc.Chrome(options=options, headless=bool(os.environ.get("CI")))
+        return webdriver.Chrome(options=options)
+    else:
+        # Use undetected_chromedriver locally
+        options = uc.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        return uc.Chrome(options=options)
 
 
 def login(driver):
