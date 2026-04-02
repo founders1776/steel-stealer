@@ -26,6 +26,8 @@ from pathlib import Path
 
 import requests
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import undetected_chromedriver as uc
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -195,13 +197,15 @@ def create_driver():
     if os.environ.get("CI"):
         options.add_argument("--headless=new")
         options.add_argument("--disable-dev-shm-usage")
-    return uc.Chrome(options=options, headless=bool(os.environ.get("CI")), version_main=145)
+    return uc.Chrome(options=options, headless=bool(os.environ.get("CI")))
 
 
 def login(driver):
     log.info("Navigating to Steel City login page...")
     driver.get(f"{CONFIG['base_url']}/a/s/")
-    time.sleep(6)
+    WebDriverWait(driver, 30).until(
+        EC.presence_of_element_located((By.ID, "scv_customer_number"))
+    )
 
     driver.find_element(By.ID, "scv_customer_number").clear()
     driver.find_element(By.ID, "scv_customer_number").send_keys(CONFIG["account"])
