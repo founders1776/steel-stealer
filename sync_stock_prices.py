@@ -194,6 +194,9 @@ def get_best_price(sku, dealer_cost, competitor_prices):
 def create_driver():
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
+    chrome_binary = os.environ.get("CHROME_BINARY")
+    if chrome_binary:
+        options.binary_location = chrome_binary
     if os.environ.get("CI"):
         options.add_argument("--headless=new")
         options.add_argument("--disable-dev-shm-usage")
