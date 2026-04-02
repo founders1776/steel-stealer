@@ -191,11 +191,29 @@ def get_best_price(sku, dealer_cost, competitor_prices):
 
 # ── Browser helpers (from check_stock.py) ───────────────────────────────────
 
+def _detect_chrome_major():
+    """Detect installed Chrome major version to pin chromedriver."""
+    import subprocess
+    for cmd in ["google-chrome --version", "chromium --version",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --version"]:
+        try:
+            out = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL)
+            ver = re.search(r"(\d+)\.", out)
+            if ver:
+                return int(ver.group(1))
+        except Exception:
+            continue
+    return None
+
+
 def create_driver():
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    return uc.Chrome(options=options)
+    options.add_argument("--disable-gpu")
+    version = _detect_chrome_major()
+    log.info(f"Detected Chrome version: {version}")
+    return uc.Chrome(options=options, version_main=version)
 
 
 def login(driver):
