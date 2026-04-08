@@ -348,6 +348,137 @@ def shopify_put(path, payload, retries=3):
     return None, None
 
 
+def shopify_get(path, retries=3):
+    """GET from Shopify REST API with retry."""
+    for attempt in range(retries):
+        try:
+            resp = requests.get(
+                shopify_api_url(path), headers=shopify_headers(), timeout=30,
+            )
+            if resp.status_code == 429:
+                time.sleep(float(resp.headers.get("Retry-After", 2)))
+                continue
+            if resp.status_code in (500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep((attempt + 1) * 5)
+                continue
+            resp.raise_for_status()
+            return resp.json(), resp.status_code
+        except requests.exceptions.ConnectionError:
+            if attempt < retries - 1:
+                time.sleep((attempt + 1) * 5)
+            else:
+                raise
+    return None, None
+
+
+def shopify_post(path, payload, retries=3):
+    """POST to Shopify REST API with retry."""
+    for attempt in range(retries):
+        try:
+            resp = requests.post(
+                shopify_api_url(path), json=payload,
+                headers=shopify_headers(), timeout=30,
+            )
+            if resp.status_code == 429:
+                time.sleep(float(resp.headers.get("Retry-After", 2)))
+                continue
+            if resp.status_code in (500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep((attempt + 1) * 5)
+                continue
+            resp.raise_for_status()
+            return resp.json(), resp.status_code
+        except requests.exceptions.ConnectionError:
+            if attempt < retries - 1:
+                time.sleep((attempt + 1) * 5)
+            else:
+                raise
+    return None, None
+
+
+# ── OOS-but-published helpers (SEO-friendly: keep URL indexable) ────────────
+
+_PRIMARY_LOCATION_ID = None
+
+
+def get_primary_location_id():
+    """Cache and return the primary Shopify location id."""
+    global _PRIMARY_LOCATION_ID
+    if _PRIMARY_LOCATION_ID is not None:
+        return _PRIMARY_LOCATION_ID
+    data, _ = shopify_get("locations.json")
+    if not data:
+        return None
+    locs = data.get("locations", [])
+    primary = next((l for l in locs if l.get("primary")), None) or (locs[0] if locs else None)
+    if primary:
+        _PRIMARY_LOCATION_ID = primary["id"]
+    return _PRIMARY_LOCATION_ID
+
+
+def get_inventory_item_id(variant_id):
+    data, _ = shopify_get(f"variants/{variant_id}.json")
+    if not data:
+        return None
+    return data.get("variant", {}).get("inventory_item_id")
+
+
+def set_oos_unbuyable(product_id, variant_id):
+    """
+    SEO-correct OOS flow: keep the product Active so its URL stays indexed
+    by Google, but make it unbuyable:
+      - inventory_management = shopify (track stock)
+      - inventory_policy = deny (no overselling)
+      - inventory level = 0 at primary location
+      - status = active (in case it was previously drafted)
+    """
+    # 1. Enable tracking + deny overselling on the variant
+    variant_payload = {"variant": {
+        "id": int(variant_id),
+        "inventory_management": "shopify",
+        "inventory_policy": "deny",
+    }}
+    shopify_put(f"variants/{variant_id}.json", variant_payload)
+    time.sleep(0.55)
+
+    # 2. Zero out inventory at the primary location
+    iid = get_inventory_item_id(variant_id)
+    loc_id = get_primary_location_id()
+    if iid and loc_id:
+        shopify_post("inventory_levels/set.json", {
+            "location_id": loc_id,
+            "inventory_item_id": iid,
+            "available": 0,
+        })
+        time.sleep(0.55)
+
+    # 3. Make sure status is active (so the storefront URL renders, indexable)
+    shopify_put(f"products/{product_id}.json",
+                {"product": {"id": int(product_id), "status": "active"}})
+    time.sleep(0.55)
+    return True
+
+
+def set_in_stock(product_id, variant_id, qty):
+    """
+    Bump stock back to a positive number when product comes back in stock.
+    Status should already be active under the new flow, but we set it as
+    a safety net in case a legacy product is still in draft.
+    """
+    iid = get_inventory_item_id(variant_id)
+    loc_id = get_primary_location_id()
+    if iid and loc_id:
+        shopify_post("inventory_levels/set.json", {
+            "location_id": loc_id,
+            "inventory_item_id": iid,
+            "available": int(qty),
+        })
+        time.sleep(0.55)
+    shopify_put(f"products/{product_id}.json",
+                {"product": {"id": int(product_id), "status": "active"}})
+    time.sleep(0.55)
+    return True
+
+
 def set_product_status(product_id, status):
     """Set Shopify product status to 'active' or 'draft'."""
     payload = {"product": {"id": int(product_id), "status": status}}
@@ -514,24 +645,32 @@ def run_sync(driver, dry_run=False):
             was_in_stock = old_qty is None or old_qty > 0  # assume in-stock if no prior data
             now_in_stock = new_qty > 0
 
+            variant_id = product.get("variant_id")
+
             if was_in_stock and not now_in_stock:
-                # Was available → now out of stock: draft the product
-                log.info(f"  DRAFT: {sku} (qty=0) ({product.get('clean_name', '')[:40]})")
+                # Was available → now out of stock.
+                # SEO-friendly: keep product Active but unbuyable so the URL
+                # stays indexed by Google. Customer cannot purchase (deny + 0 qty).
+                log.info(f"  OOS: {sku} (qty=0, keep published, unbuyable) ({product.get('clean_name', '')[:40]})")
                 if not dry_run:
-                    ok = set_product_status(product_id, "draft")
-                    if not ok:
-                        changes["errors"].append({"sku": sku, "error": "draft_failed"})
-                    time.sleep(0.55)
-                changes["drafted"].append(sku)
+                    if variant_id:
+                        ok = set_oos_unbuyable(product_id, variant_id)
+                        if not ok:
+                            changes["errors"].append({"sku": sku, "error": "oos_failed"})
+                    else:
+                        changes["errors"].append({"sku": sku, "error": "no_variant_id_for_oos"})
+                changes["drafted"].append(sku)  # log key kept as "drafted" for back-compat with email summary
 
             elif not was_in_stock and now_in_stock:
-                # Was out → now back in stock: reactivate
-                log.info(f"  ACTIVATE: {sku} (qty={new_qty}) ({product.get('clean_name', '')[:40]})")
+                # Was out → now back in stock: bump inventory level
+                log.info(f"  RESTOCK: {sku} (qty={new_qty}) ({product.get('clean_name', '')[:40]})")
                 if not dry_run:
-                    ok = set_product_status(product_id, "active")
-                    if not ok:
-                        changes["errors"].append({"sku": sku, "error": "activate_failed"})
-                    time.sleep(0.55)
+                    if variant_id:
+                        ok = set_in_stock(product_id, variant_id, new_qty)
+                        if not ok:
+                            changes["errors"].append({"sku": sku, "error": "restock_failed"})
+                    else:
+                        changes["errors"].append({"sku": sku, "error": "no_variant_id_for_restock"})
                 changes["activated"].append(sku)
 
             # Always store real qty for next run's comparison
