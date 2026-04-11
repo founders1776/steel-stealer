@@ -26,13 +26,33 @@ jobs:
       - name: Scrape competitor prices
         run: python scrape_competitor_prices.py
 
-      - name: Commit updated competitor data
+      - name: Calculate competitive pricing decisions
+        run: python calculate_competitive_prices.py 2>&1 | tee /tmp/pricing_output.txt
+
+      - name: Commit updated competitor data + pricing decisions
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add competitor_prices.json competitor_price_progress.json
-          git diff --cached --quiet || git commit -m "Auto-scrape: weekly competitor price update"
+          git add competitor_prices.json competitor_price_progress.json pricing_decisions.json product_names.json
+          git diff --cached --quiet || git commit -m "Auto-scrape: weekly competitor price update + pricing decisions"
           git push
+
+      - name: Build email report
+        if: always()
+        run: |
+          if [ -f /tmp/pricing_output.txt ]; then
+            REPORT=$(cat /tmp/pricing_output.txt | tail -50)
+          else
+            REPORT="calculate_competitive_prices.py did not produce output."
+          fi
+          if [ -f pricing_decisions.json ]; then
+            TOTAL=$(python3 -c "import json; d=json.load(open('pricing_decisions.json')); print(f\"Total decisions: {len(d.get('decisions',[]))}\")" 2>/dev/null || echo "Could not parse pricing_decisions.json")
+            CHANGED=$(python3 -c "import json; d=json.load(open('pricing_decisions.json')); print(f\"Price changes: {sum(1 for x in d.get('decisions',[]) if x.get('action')=='change')}\")" 2>/dev/null || echo "")
+          else
+            TOTAL="No pricing_decisions.json found"
+            CHANGED=""
+          fi
+          echo -e "Steel Stealer — Weekly Competitive Pricing Report\n\nJob status: ${{ job.status }}\n\n${TOTAL}\n${CHANGED}\n\n--- Script Output ---\n${REPORT}" > /tmp/email_body.txt
 
       - name: Send email summary
         if: always()
@@ -42,10 +62,10 @@ jobs:
           server_port: 465
           username: ${{ secrets.EMAIL_USERNAME }}
           password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: "Steel Stealer - Weekly Competitor Price Scrape"
+          subject: "Steel Stealer - Weekly Competitive Pricing Report (${{ job.status }})"
           to: ${{ secrets.EMAIL_USERNAME }}
           from: ${{ secrets.EMAIL_USERNAME }}
-          body: "Weekly competitor price scrape completed. Check pricing_decisions.json for results."
+          body: file:///tmp/email_body.txt
 
       - name: Send phone notification
         if: always()

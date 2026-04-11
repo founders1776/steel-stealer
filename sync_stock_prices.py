@@ -246,7 +246,7 @@ def login(driver):
 
 
 def api_product_info_batch(driver, part_ids):
-    """Call product_info API for multiple parts concurrently."""
+    """Call product_info API for multiple parts concurrently, with timeout + retry."""
     try:
         result = driver.execute_script("""
             var ids = arguments[0];
@@ -255,24 +255,81 @@ def api_product_info_batch(driver, part_ids):
                     $.ajax({
                         type: 'POST',
                         url: 'applications/shopping_cart/web_services.php?action=product_info&name=' + encodeURIComponent(pid),
+                        timeout: 10000,
                         success: function(data) {
                             if (typeof data === 'string') {
                                 try { data = JSON.parse(data); } catch(e) {}
                             }
-                            resolve({id: pid, data: data});
+                            resolve({id: pid, data: data, status: 'ok'});
                         },
-                        error: function() { resolve({id: pid, data: null}); }
+                        error: function(xhr, status) { resolve({id: pid, data: null, status: status || 'error'}); }
                     });
                 });
             });
             return Promise.all(promises).then(function(results) {
                 var out = {};
-                results.forEach(function(r) { out[r.id] = r.data; });
+                results.forEach(function(r) { out[r.id] = {data: r.data, status: r.status}; });
                 return JSON.stringify(out);
             });
         """, part_ids)
         if result:
-            return json.loads(result)
+            parsed = json.loads(result)
+            # Extract data, retry any that failed
+            out = {}
+            retry_ids = []
+            for pid, info in parsed.items():
+                if isinstance(info, dict) and 'data' in info:
+                    if info['data'] is not None:
+                        out[pid] = info['data']
+                    else:
+                        retry_ids.append(pid)
+                        log.debug(f"  API miss for {pid} (status={info.get('status','?')}), will retry")
+                elif info is not None:
+                    out[pid] = info  # legacy format (direct data)
+                else:
+                    retry_ids.append(pid)
+
+            # Retry failed SKUs individually with longer timeout
+            if retry_ids:
+                log.info(f"  Retrying {len(retry_ids)} failed API lookups individually...")
+                time.sleep(1)
+                for pid in retry_ids:
+                    try:
+                        retry_result = driver.execute_script("""
+                            var pid = arguments[0];
+                            return new Promise(function(resolve) {
+                                $.ajax({
+                                    type: 'POST',
+                                    url: 'applications/shopping_cart/web_services.php?action=product_info&name=' + encodeURIComponent(pid),
+                                    timeout: 15000,
+                                    success: function(data) {
+                                        if (typeof data === 'string') {
+                                            try { data = JSON.parse(data); } catch(e) {}
+                                        }
+                                        resolve(JSON.stringify({data: data, status: 'ok'}));
+                                    },
+                                    error: function(xhr, status) {
+                                        resolve(JSON.stringify({data: null, status: (status || 'error') + ' http=' + (xhr.status || '?')}));
+                                    }
+                                });
+                            });
+                        """, pid)
+                        if retry_result:
+                            r = json.loads(retry_result)
+                            if r.get('data'):
+                                out[pid] = r['data']
+                                log.info(f"  Retry SUCCESS for {pid}")
+                            else:
+                                log.info(f"  Retry FAILED for {pid} (status={r.get('status','?')})")
+                                out[pid] = None
+                        else:
+                            out[pid] = None
+                        time.sleep(0.5)
+                    except Exception as e:
+                        log.debug(f"  Retry exception for {pid}: {e}")
+                        out[pid] = None
+
+            return out
     except Exception as e:
         log.debug(f"Batch API failed for {len(part_ids)} parts: {e}")
     return {pid: None for pid in part_ids}
@@ -622,11 +679,19 @@ def run_sync(driver, dry_run=False):
             old_qty = product.get("qty_on_hand")
             old_cost = parse_price(product.get("price"))
 
-            # Get new values from API
+            # Get new values from API — fall back to cached data if API fails
             if not api_data or not api_data.get("name"):
-                changes["errors"].append({"sku": sku, "error": "no_api_data"})
-                progress["checked_skus"].append(sku)
-                continue
+                # Try cached data from product_names.json (from a previous successful run)
+                cached_name = product.get("raw_name") or product.get("clean_name")
+                cached_desc = product.get("raw_description", "")
+                cached_price = product.get("price")
+                if cached_name and cached_price:
+                    log.info(f"  API miss for {sku}, using cached data (name={cached_name[:30]})")
+                    api_data = {"name": cached_name, "description": cached_desc, "price": cached_price}
+                else:
+                    changes["errors"].append({"sku": sku, "error": "no_api_data"})
+                    progress["checked_skus"].append(sku)
+                    continue
 
             # ── NLA detection: draft products marked No Longer Available ──
             api_name = (api_data.get("name") or "").upper()
