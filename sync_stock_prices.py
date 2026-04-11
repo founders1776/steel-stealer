@@ -619,11 +619,23 @@ def run_sync(driver, dry_run=False):
             is_nla = "NLA" in api_name or "NLA" in api_desc or \
                      "NO LONGER AVAILABLE" in api_name or "NO LONGER AVAILABLE" in api_desc
             if is_nla:
-                log.info(f"  DRAFT (NLA): {sku} ({product.get('clean_name', '')[:40]})")
+                log.info(f"  NLA: {sku} (keep active, mark discontinued) ({product.get('clean_name', '')[:40]})")
                 if not dry_run:
-                    set_product_status(product_id, "draft")
+                    # Keep product active for SEO indexing but make unbuyable
+                    if variant_id:
+                        set_oos_unbuyable(product_id, variant_id)
+                    else:
+                        set_product_status(product_id, "active")
+                    # Set NLA metafield so the theme renders a "Discontinued" badge
+                    try:
+                        nla_payload = {"product": {"id": int(product_id), "metafields": [
+                            {"namespace": "custom", "key": "product_status", "value": "nla", "type": "single_line_text_field"}
+                        ]}}
+                        shopify_put(f"products/{product_id}.json", nla_payload)
+                    except Exception as e:
+                        log.debug(f"  NLA metafield failed for {sku}: {e}")
                     time.sleep(0.55)
-                changes["drafted"].append(sku)
+                changes["drafted"].append(sku)  # log key kept for back-compat
                 products[key]["in_stock"] = "0"
                 progress["checked_skus"].append(sku)
                 save_sync_progress(progress)
