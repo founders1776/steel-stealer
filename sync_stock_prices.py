@@ -48,6 +48,7 @@ BULK_IMPORT_PROGRESS_FILE = BASE_DIR / "bulk_import_progress.json"
 MISSING_IMPORT_PROGRESS_FILE = BASE_DIR / "missing_import_progress.json"
 PRICE_LOCKS_FILE = BASE_DIR / "price_locks.json"
 COMPETITOR_PRICES_FILE = BASE_DIR / "competitor_prices.json"
+DUAL_SOURCE_FILE = BASE_DIR / "dual_source_skus.json"
 
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
@@ -564,12 +565,25 @@ def run_sync(driver, dry_run=False):
         if added:
             log.info(f"  + {added} from missing_import_progress → {len(our_product_ids)} total")
 
+    # Load dual-source exclusion list (products available from both Steel City
+    # AND the store's direct dealers — inventory should NOT be tracked against SC)
+    dual_source_skus = set()
+    if DUAL_SOURCE_FILE.exists():
+        with open(DUAL_SOURCE_FILE) as f:
+            dual_source_skus = set(json.load(f))
+        log.info(f"Dual-source SKUs to skip (available from other dealers): {len(dual_source_skus)}")
+
     # Only sync SKUs that are in both product_names and shopify_map,
-    # AND whose Shopify product_id is one we imported (not pre-existing)
+    # AND whose Shopify product_id is one we imported (not pre-existing),
+    # AND that are NOT dual-source (available from other dealers)
     sync_skus = []
     skipped_preexisting = 0
+    skipped_dual_source = 0
     for key, product in products.items():
         sku = product.get("sku", key)
+        if sku in dual_source_skus:
+            skipped_dual_source += 1
+            continue
         if sku in shopify_map:
             product_id = shopify_map[sku]["product_id"]
             if our_product_ids and product_id not in our_product_ids:
@@ -579,6 +593,7 @@ def run_sync(driver, dry_run=False):
 
     log.info(f"Products in Shopify map: {len(shopify_map)}")
     log.info(f"Skipped (pre-existing, not our import): {skipped_preexisting}")
+    log.info(f"Skipped (dual-source, available from other dealers): {skipped_dual_source}")
     log.info(f"Products to sync: {len(sync_skus)}")
 
     # Load progress for resume
