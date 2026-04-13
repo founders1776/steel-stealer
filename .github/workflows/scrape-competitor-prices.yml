@@ -8,7 +8,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours
+    timeout-minutes: 480  # 8 hours
 
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
         run: pip install requests aiohttp
 
       - name: Scrape competitor prices (async)
-        run: python scrape_competitor_prices.py --fresh
+        run: python scrape_competitor_prices.py
 
       - name: Calculate competitive pricing decisions
         run: python calculate_competitive_prices.py 2>&1 | tee /tmp/pricing_output.txt
