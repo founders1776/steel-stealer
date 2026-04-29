@@ -25,6 +25,15 @@ jobs:
           pip install setuptools selenium undetected-chromedriver requests openpyxl
           sudo apt-get update && sudo apt-get install -y xvfb
 
+      - name: Decrypt data bundle
+        env:
+          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+        run: |
+          gpg --batch --yes --quiet --pinentry-mode loopback \
+              --passphrase "$DATA_PASSPHRASE" \
+              --decrypt data.tar.gz.gpg | tar xz
+          ls -la product_names.json shopify_product_map.json
+
       - name: Run sync
         id: sync
         env:
