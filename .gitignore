@@ -24,3 +24,18 @@ replace_progress.json
 flag_results.json
 visual_review_results.json
 image_urls.json
+
+# Sensitive business data (dealer costs, pricing strategy, competitive intel)
+product_names.json
+shopify_product_map.json
+competitor_prices.json
+pricing_decisions.json
+price_locks.json
+bulk_import_progress.json
+sync_log.json
+dual_source_skus.json
+competitors.json
+pricing.md
+competitor_price_progress.json
+competitor_domains.json
+competitor_discovery_progress.json

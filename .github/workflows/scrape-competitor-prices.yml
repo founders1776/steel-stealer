@@ -26,14 +26,6 @@ jobs:
       - name: Calculate competitive pricing decisions
         run: python calculate_competitive_prices.py 2>&1 | tee /tmp/pricing_output.txt
 
-      - name: Commit updated competitor data + pricing decisions
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add competitor_prices.json competitor_price_progress.json pricing_decisions.json product_names.json
-          git diff --cached --quiet || git commit -m "Auto-scrape: weekly competitor price update + pricing decisions"
-          git push
-
       - name: Build email report
         if: always()
         run: |
@@ -71,4 +63,4 @@ jobs:
             -H "Title: Competitor Scrape ${{ job.status }}" \
             -H "Priority: ${{ job.status == 'failure' && 'high' || 'default' }}" \
             -d "Weekly competitor price scrape ${{ job.status }}." \
-            ntfy.sh/REDACTED_TOPIC
+            ntfy.sh/steelstealer-c8db7c7f50b7

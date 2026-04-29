@@ -30,15 +30,10 @@ jobs:
         env:
           SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          SC_ACCOUNT: ${{ secrets.SC_ACCOUNT }}
+          SC_USER: ${{ secrets.SC_USER }}
+          SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
         run: xvfb-run --auto-servernum python sync_stock_prices.py
-
-      - name: Commit updated data
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add product_names.json sync_log.json
-          git diff --cached --quiet || git commit -m "Auto-sync: stock/price updates"
-          git push
 
       - name: Send email report
         if: always()
@@ -61,4 +56,4 @@ jobs:
             -H "Priority: ${{ steps.sync.outcome == 'failure' && 'high' || 'default' }}" \
             -H "Tags: ${{ steps.sync.outcome == 'failure' && 'warning' || 'white_check_mark' }}" \
             -d "Steel Stealer sync ${{ steps.sync.outcome }}. Check email for details." \
-            ntfy.sh/REDACTED_TOPIC
+            ntfy.sh/steelstealer-c8db7c7f50b7

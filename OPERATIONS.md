@@ -10,7 +10,7 @@ Everything you need to know to manage the Shopify store and sync pipeline.
 |---|---|
 | Shopify Admin | `1bb2a2-2.myshopify.com/admin` |
 | Shopify credentials | `.env` file |
-| Steel City login | Account: REDACTED_ACCT / REDACTED_USER / REDACTED_PASS |
+| Steel City login | See `.env` (SC_ACCOUNT, SC_USER, SC_PASSWORD) |
 | Product data | `product_names.json` (8,081 products) |
 | Shopify SKU map | `shopify_product_map.json` (8,353 SKUs) |
 | Price locks (MAP) | `price_locks.json` (15 Titan vacuums) |
@@ -42,6 +42,9 @@ The workflow file is at `.github/workflows/sync-stock-prices.yml`.
 | `EMAIL_USERNAME` | Your Gmail address |
 | `EMAIL_PASSWORD` | Gmail app password (not your regular password) |
 | `EMAIL_TO` | Where to send sync reports |
+| `SC_ACCOUNT` | Steel City account number |
+| `SC_USER` | Steel City username |
+| `SC_PASSWORD` | Steel City password |
 
 **Schedule:** Runs at 6am and 6pm UTC. Also has a manual trigger button in GitHub Actions.
 

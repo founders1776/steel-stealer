@@ -54,9 +54,9 @@ def get_rembg():
 CONFIG = {
     "base_url": "https://www.steelcityvac.com",
     "schematics_url": "https://www.steelcityvac.com/a/g/?t=1&gid=1&folder=",
-    "account": "REDACTED_ACCT",
-    "user_id": "REDACTED_USER",
-    "password": "REDACTED_PASS",
+    "account": os.environ.get("SC_ACCOUNT", ""),
+    "user_id": os.environ.get("SC_USER", ""),
+    "password": os.environ.get("SC_PASSWORD", ""),
 }
 
 BASE_DIR = Path(__file__).parent
@@ -110,73 +110,30 @@ def save_progress(progress):
 def create_driver():
     import undetected_chromedriver as uc
     options = uc.ChromeOptions()
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument(f"--user-data-dir={BASE_DIR / 'browser_data'}")
+    options.add_argument("--no-sandbox")
     return uc.Chrome(options=options, headless=False, version_main=145)
-
-
-def wait_for_cloudflare(driver, max_wait=120):
-    if "just a moment" not in driver.title.lower():
-        return
-    log.info("Cloudflare challenge detected — waiting...")
-    for i in range(max_wait // 2):
-        time.sleep(2)
-        if "just a moment" not in driver.title.lower():
-            log.info(f"Cloudflare resolved after ~{(i+1)*2}s")
-            time.sleep(2)
-            return
-    raise TimeoutError("Cloudflare challenge not resolved.")
 
 
 def login(driver):
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
 
-    log.info("Navigating to Steel City Vacuum...")
+    log.info("Navigating to Steel City login page...")
+    driver.get(f"{CONFIG['base_url']}/a/s/")
+    time.sleep(6)
+
+    driver.find_element(By.ID, "scv_customer_number").clear()
+    driver.find_element(By.ID, "scv_customer_number").send_keys(CONFIG["account"])
+    driver.find_element(By.ID, "username_login_box").clear()
+    driver.find_element(By.ID, "username_login_box").send_keys(CONFIG["user_id"])
+    driver.find_element(By.ID, "password_login").clear()
+    driver.find_element(By.ID, "password_login").send_keys(CONFIG["password"])
+    driver.find_element(By.NAME, "loginSubmit").click()
+    time.sleep(5)
+    log.info(f"Logged in. URL: {driver.current_url}")
+
+    # Navigate to base URL so API calls work
     driver.get(CONFIG["base_url"])
     time.sleep(3)
-    wait_for_cloudflare(driver)
-
-    try:
-        nav = driver.find_element(By.ID, "main-nav")
-        if "notlogged" not in (nav.get_attribute("class") or "").lower():
-            log.info("Already logged in!")
-            return
-    except Exception:
-        pass
-
-    log.info("Logging in...")
-    try:
-        driver.find_element(By.CSS_SELECTOR, "a.nav-login-btn").click()
-        time.sleep(1)
-    except Exception:
-        pass
-
-    wait = WebDriverWait(driver, 10)
-    customer_field = wait.until(EC.visibility_of_element_located((By.ID, "scvCustomerNumber")))
-    for field_id, value in [
-        ("scvCustomerNumber", CONFIG["account"]),
-        ("userNameBox", CONFIG["user_id"]),
-        ("password", CONFIG["password"]),
-    ]:
-        el = driver.find_element(By.ID, field_id) if field_id != "scvCustomerNumber" else customer_field
-        el.clear()
-        for ch in value:
-            el.send_keys(ch)
-            time.sleep(random.uniform(0.02, 0.08))
-        time.sleep(random.uniform(0.3, 0.6))
-
-    try:
-        driver.find_element(By.CSS_SELECTOR, "a.login-btn").click()
-    except Exception:
-        driver.execute_script("submitLoginForm()")
-
-    time.sleep(5)
-    wait_for_cloudflare(driver)
-    log.info("Login complete.")
 
 
 def navigate_to_site(driver):

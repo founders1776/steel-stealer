@@ -34,9 +34,9 @@ import undetected_chromedriver as uc
 
 CONFIG = {
     "base_url": "https://www.steelcityvac.com",
-    "account": "REDACTED_ACCT",
-    "user_id": "REDACTED_USER",
-    "password": "REDACTED_PASS",
+    "account": os.environ.get("SC_ACCOUNT", ""),
+    "user_id": os.environ.get("SC_USER", ""),
+    "password": os.environ.get("SC_PASSWORD", ""),
 }
 
 BASE_DIR = Path(__file__).parent

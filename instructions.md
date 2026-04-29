@@ -13,7 +13,7 @@ Feed this file to a new Claude session to pick up where we left off.
 
 Single script `scraper.py` that:
 1. Uses `undetected-chromedriver` (Selenium-based) to bypass Cloudflare Turnstile
-2. Logs in with dealer credentials (account REDACTED_ACCT, ID REDACTED_USER, Password REDACTED_PASS)
+2. Logs in with dealer credentials (from SC_ACCOUNT, SC_USER, SC_PASSWORD env vars)
 3. Navigates the 3-level hierarchy: Brands (54) → Models (paginated) → Schematics
 4. Extracts part IDs from `<area>` image map hotspots on schematic pages
 5. Calls the internal API for each part to get full details (name, SKU, description, price, alt items)
