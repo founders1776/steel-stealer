@@ -5,6 +5,9 @@ on:
     - cron: '0 6,18 * * *'  # Every 12 hours (6am, 6pm UTC)
   workflow_dispatch: {}       # Manual trigger button
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -43,6 +46,34 @@ jobs:
           SC_USER: ${{ secrets.SC_USER }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
         run: xvfb-run --auto-servernum python sync_stock_prices.py
+
+      - name: Re-encrypt and commit data bundle
+        if: always() && steps.sync.outcome != 'cancelled'
+        env:
+          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz \
+            product_names.json shopify_product_map.json price_locks.json \
+            competitor_prices.json bulk_import_progress.json \
+            missing_import_progress.json dual_source_skus.json
+          NEW_HASH=$(sha256sum data.tar.gz | cut -d' ' -f1)
+          OLD_HASH=$(cat .data-bundle.hash 2>/dev/null || true)
+          if [ "$NEW_HASH" = "$OLD_HASH" ]; then
+            echo "Bundle contents unchanged (sha256=$NEW_HASH) — skipping commit"
+            rm data.tar.gz
+            exit 0
+          fi
+          echo "$NEW_HASH" > .data-bundle.hash
+          gpg --batch --yes --quiet --pinentry-mode loopback \
+              --passphrase "$DATA_PASSPHRASE" --cipher-algo AES256 \
+              --symmetric --output data.tar.gz.gpg data.tar.gz
+          rm data.tar.gz
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.tar.gz.gpg .data-bundle.hash
+          git commit -m "data: refresh encrypted bundle (run ${GITHUB_RUN_ID})"
+          git push
 
       - name: Send email report
         if: always()

@@ -737,8 +737,6 @@ def run_sync(driver, dry_run=False):
             was_in_stock = old_qty is None or old_qty > 0  # assume in-stock if no prior data
             now_in_stock = new_qty > 0
 
-            variant_id = product.get("variant_id")
-
             if was_in_stock and not now_in_stock:
                 # Was available → now out of stock.
                 # SEO-friendly: keep product Active but unbuyable so the URL
