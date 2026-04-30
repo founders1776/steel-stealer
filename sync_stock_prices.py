@@ -672,6 +672,9 @@ def run_sync(driver, dry_run=False):
 
         for key, sku, product in batch:
             api_data = results.get(sku)
+            # Steel City returns a list when a SKU lookup is ambiguous; pick the first dict.
+            if isinstance(api_data, list):
+                api_data = next((x for x in api_data if isinstance(x, dict)), None)
             shop_info = shopify_map[sku]
             product_id = shop_info["product_id"]
             variant_id = shop_info["variant_id"]
