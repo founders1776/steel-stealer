@@ -49,6 +49,7 @@ MISSING_IMPORT_PROGRESS_FILE = BASE_DIR / "missing_import_progress.json"
 PRICE_LOCKS_FILE = BASE_DIR / "price_locks.json"
 COMPETITOR_PRICES_FILE = BASE_DIR / "competitor_prices.json"
 DUAL_SOURCE_FILE = BASE_DIR / "dual_source_skus.json"
+DUAL_SOURCE_BRANDS_FILE = BASE_DIR / "dual_source_brands.json"
 
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
@@ -630,19 +631,39 @@ def run_sync(driver, dry_run=False):
             dual_source_skus = set(json.load(f))
         log.info(f"Dual-source SKUs to skip (available from other dealers): {len(dual_source_skus)}")
 
+    # Brand-level dual-source: any product whose brand matches is skipped.
+    # Brands we always have direct access to (e.g. Sebo) should never have
+    # their stock tracked against Steel City.
+    dual_source_brands = set()
+    if DUAL_SOURCE_BRANDS_FILE.exists():
+        with open(DUAL_SOURCE_BRANDS_FILE) as f:
+            dual_source_brands = {b.strip().upper() for b in json.load(f) if b and b.strip()}
+        log.info(f"Dual-source brands to skip: {sorted(dual_source_brands)}")
+
     # Only sync SKUs that are in both product_names and shopify_map,
     # AND whose Shopify product_id is one we imported (not pre-existing),
     # AND that are NOT dual-source (available from other dealers)
     sync_skus = []
     skipped_preexisting = 0
     skipped_dual_source = 0
+    skipped_dual_brand = 0
     for key, product in products.items():
         sku = product.get("sku", key)
         if sku in dual_source_skus:
             skipped_dual_source += 1
             continue
-        if sku in shopify_map:
-            product_id = shopify_map[sku]["product_id"]
+        map_entry = shopify_map.get(sku)
+        # Brand-level dual-source skip. The Shopify product vendor is authoritative
+        # (it's what the storefront groups by); fall back to product_names' brand
+        # for SKUs whose map entry predates vendor capture.
+        if dual_source_brands:
+            vendor = (map_entry.get("vendor") if map_entry else "") or ""
+            brand = product.get("brand") or ""
+            if vendor.strip().upper() in dual_source_brands or brand.strip().upper() in dual_source_brands:
+                skipped_dual_brand += 1
+                continue
+        if map_entry:
+            product_id = map_entry["product_id"]
             if our_product_ids and product_id not in our_product_ids:
                 skipped_preexisting += 1
                 continue
@@ -650,7 +671,8 @@ def run_sync(driver, dry_run=False):
 
     log.info(f"Products in Shopify map: {len(shopify_map)}")
     log.info(f"Skipped (pre-existing, not our import): {skipped_preexisting}")
-    log.info(f"Skipped (dual-source, available from other dealers): {skipped_dual_source}")
+    log.info(f"Skipped (dual-source SKU): {skipped_dual_source}")
+    log.info(f"Skipped (dual-source brand/vendor): {skipped_dual_brand}")
     log.info(f"Products to sync: {len(sync_skus)}")
 
     # Load progress for resume

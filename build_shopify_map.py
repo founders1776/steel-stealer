@@ -65,7 +65,7 @@ def api_get(path, params=None, retries=3):
 def build_map():
     """Paginate all Shopify products and build SKU → IDs mapping."""
     product_map = {}
-    params = {"limit": 250, "fields": "id,variants"}
+    params = {"limit": 250, "fields": "id,vendor,variants"}
     page = 0
 
     print("Fetching products from Shopify...")
@@ -83,12 +83,14 @@ def build_map():
 
         for product in products:
             product_id = str(product["id"])
+            vendor = (product.get("vendor") or "").strip()
             for variant in product.get("variants", []):
                 sku = (variant.get("sku") or "").strip()
                 if sku:
                     product_map[sku] = {
                         "product_id": product_id,
                         "variant_id": str(variant["id"]),
+                        "vendor": vendor,
                     }
 
         page += 1

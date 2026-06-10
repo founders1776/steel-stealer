@@ -336,12 +336,23 @@ Phase 3c: Automated Stock & Price Sync
        |
   [sync_stock_prices.py — runs every 12 hours via GitHub Actions]
        |
+  [Exclusions applied BEFORE any API call:
+    - SKU in dual_source_skus.json → skip (per-SKU exclusion)
+    - dual_source_brands.json → skip (brand-wide; e.g. SEBO, always
+      available from direct distributor). Matched against the Shopify
+      VENDOR from shopify_product_map.json (authoritative — the field
+      the storefront groups by), falling back to product_names `brand`.
+    - product_id not in bulk_import_progress / missing_import_progress
+      → skip (pre-existing Shopify product, not our import)]
+       |
   [Launch browser → login to Steel City → batch API calls (8 concurrent)]
        |
   [Compare current vs stored: stock status + dealer cost]
        |
-  [in_stock 1→0 → PUT product status="draft" (hide from store)]
-  [in_stock 0→1 → PUT product status="active" (show in store)]
+  [qty 1→0 → set_oos_unbuyable: variant inventory_management=shopify,
+              inventory_policy=deny, qty=0, status=active (keep SEO URL)]
+  [qty 0→1 → set_in_stock: variant qty=new_qty, status=active]
+  [NLA detected in API name/desc → set_oos_unbuyable + NLA metafield]
   [cost increased → recalculate retail via markup tiers → PUT variant price + cost]
   [cost decreased → NO ACTION (protect margins)]
        |
@@ -386,9 +397,12 @@ Phase 3c: Automated Stock & Price Sync
 | `generate_pricing.py` | Phase 2g — tiered markup engine with charm pricing + $6.99 floor |
 | `shopify_upload.py` | Phase 3 — upload images to Shopify Files, generate CSV (uses retail_price) |
 | `generate_shopify_csv.py` | Phase 3b — auto-tagged Shopify CSV from product_names.json (dedup + exclude existing) |
-| `build_shopify_map.py` | Phase 3c — builds SKU → {product_id, variant_id} mapping from Shopify (one-time) |
+| `build_shopify_map.py` | Phase 3c — builds SKU → {product_id, variant_id, vendor} mapping from Shopify (rerun after new products land) |
 | `sync_stock_prices.py` | Phase 3c — automated stock/price sync: Steel City → Shopify (12h cron) |
-| `shopify_product_map.json` | Phase 3c — SKU → {product_id, variant_id} mapping |
+| `dual_source_skus.json` | Phase 3c — per-SKU exclusion list (skip stock/price sync; available from other dealers) |
+| `dual_source_brands.json` | Phase 3c — brand-wide exclusion list (e.g. `["SEBO"]`); any product with matching brand skipped entirely |
+| `restore_dual_source.py` | Phase 3c — cleanup: scans the LIVE store by vendor (dual_source_brands) + dual_source_skus and re-untracks/reactivates products flipped to inventory_management=shopify+deny or draft by a prior sync |
+| `shopify_product_map.json` | Phase 3c — SKU → {product_id, variant_id, vendor} mapping (vendor drives dual-source skip) |
 | `sync_log.json` | Phase 3c — append-only log of all sync runs |
 | `.github/workflows/sync-stock-prices.yml` | Phase 3c — GitHub Actions cron (6am + 6pm UTC) |
 | `image_urls.json` | Shopify CDN URLs per SKU (after upload) |
