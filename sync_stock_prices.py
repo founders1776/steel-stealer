@@ -490,31 +490,36 @@ def set_oos_unbuyable(product_id, variant_id):
       - inventory level = 0 at primary location
       - status = active (in case it was previously drafted)
     """
-    # 1. Enable tracking + deny overselling on the variant
-    variant_payload = {"variant": {
-        "id": int(variant_id),
-        "inventory_management": "shopify",
-        "inventory_policy": "deny",
-    }}
-    shopify_put(f"variants/{variant_id}.json", variant_payload)
-    time.sleep(0.55)
-
-    # 2. Zero out inventory at the primary location
-    iid = get_inventory_item_id(variant_id)
-    loc_id = get_primary_location_id()
-    if iid and loc_id:
-        shopify_post("inventory_levels/set.json", {
-            "location_id": loc_id,
-            "inventory_item_id": iid,
-            "available": 0,
-        })
+    try:
+        # 1. Enable tracking + deny overselling on the variant
+        variant_payload = {"variant": {
+            "id": int(variant_id),
+            "inventory_management": "shopify",
+            "inventory_policy": "deny",
+        }}
+        shopify_put(f"variants/{variant_id}.json", variant_payload)
         time.sleep(0.55)
 
-    # 3. Make sure status is active (so the storefront URL renders, indexable)
-    shopify_put(f"products/{product_id}.json",
-                {"product": {"id": int(product_id), "status": "active"}})
-    time.sleep(0.55)
-    return True
+        # 2. Zero out inventory at the primary location
+        iid = get_inventory_item_id(variant_id)
+        loc_id = get_primary_location_id()
+        if iid and loc_id:
+            shopify_post("inventory_levels/set.json", {
+                "location_id": loc_id,
+                "inventory_item_id": iid,
+                "available": 0,
+            })
+            time.sleep(0.55)
+
+        # 3. Make sure status is active (so the storefront URL renders, indexable)
+        shopify_put(f"products/{product_id}.json",
+                    {"product": {"id": int(product_id), "status": "active"}})
+        time.sleep(0.55)
+        return True
+    except Exception as e:
+        # One bad variant must not abort the whole sync; caller records the error.
+        log.warning(f"  OOS update failed (status {getattr(getattr(e, 'response', None), 'status_code', '?')}) — continuing")
+        return False
 
 
 def set_in_stock(product_id, variant_id, qty):
@@ -523,26 +528,37 @@ def set_in_stock(product_id, variant_id, qty):
     Status should already be active under the new flow, but we set it as
     a safety net in case a legacy product is still in draft.
     """
-    iid = get_inventory_item_id(variant_id)
-    loc_id = get_primary_location_id()
-    if iid and loc_id:
-        shopify_post("inventory_levels/set.json", {
-            "location_id": loc_id,
-            "inventory_item_id": iid,
-            "available": int(qty),
-        })
+    try:
+        iid = get_inventory_item_id(variant_id)
+        loc_id = get_primary_location_id()
+        if iid and loc_id:
+            shopify_post("inventory_levels/set.json", {
+                "location_id": loc_id,
+                "inventory_item_id": iid,
+                "available": int(qty),
+            })
+            time.sleep(0.55)
+        shopify_put(f"products/{product_id}.json",
+                    {"product": {"id": int(product_id), "status": "active"}})
         time.sleep(0.55)
-    shopify_put(f"products/{product_id}.json",
-                {"product": {"id": int(product_id), "status": "active"}})
-    time.sleep(0.55)
-    return True
+        return True
+    except Exception as e:
+        # A single bad variant (e.g. 422 from inventory_levels/set when the item
+        # isn't stocked at the location) must not abort the whole sync. The caller
+        # records this SKU under errors and continues.
+        log.warning(f"  restock failed (status {getattr(getattr(e, 'response', None), 'status_code', '?')}) — continuing")
+        return False
 
 
 def set_product_status(product_id, status):
     """Set Shopify product status to 'active' or 'draft'."""
     payload = {"product": {"id": int(product_id), "status": status}}
-    data, code = shopify_put(f"products/{product_id}.json", payload)
-    return data is not None
+    try:
+        data, code = shopify_put(f"products/{product_id}.json", payload)
+        return data is not None
+    except Exception as e:
+        log.warning(f"  status update failed (status {getattr(getattr(e, 'response', None), 'status_code', '?')}) — continuing")
+        return False
 
 
 def update_variant_price(variant_id, retail_price, cost):
@@ -552,8 +568,13 @@ def update_variant_price(variant_id, retail_price, cost):
         "price": f"{retail_price:.2f}",
         "cost": f"{cost:.2f}",
     }}
-    data, code = shopify_put(f"variants/{variant_id}.json", payload)
-    return data is not None
+    try:
+        data, code = shopify_put(f"variants/{variant_id}.json", payload)
+        return data is not None
+    except Exception as e:
+        # Don't let one variant's 4xx abort the sync; caller records the error.
+        log.warning(f"  price update failed (status {getattr(getattr(e, 'response', None), 'status_code', '?')}) — continuing")
+        return False
 
 
 # ── Progress helpers ────────────────────────────────────────────────────────
