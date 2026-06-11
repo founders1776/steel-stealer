@@ -638,7 +638,7 @@ def run_sync(driver, dry_run=False):
     if DUAL_SOURCE_BRANDS_FILE.exists():
         with open(DUAL_SOURCE_BRANDS_FILE) as f:
             dual_source_brands = {b.strip().upper() for b in json.load(f) if b and b.strip()}
-        log.info(f"Dual-source brands to skip: {sorted(dual_source_brands)}")
+        log.info(f"Dual-source brands to skip: {len(dual_source_brands)} (names redacted — public CI log)")
 
     # Only sync SKUs that are in both product_names and shopify_map,
     # AND whose Shopify product_id is one we imported (not pre-existing),
