@@ -5,6 +5,9 @@ on:
     - cron: '0 2 * * 0'  # Every Sunday at 2am UTC
   workflow_dispatch: {}   # Manual trigger button
 
+permissions:
+  contents: write
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -20,11 +23,104 @@ jobs:
       - name: Install dependencies
         run: pip install requests aiohttp
 
+      - name: Decrypt data bundle
+        env:
+          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+        run: |
+          gpg --batch --yes --quiet --pinentry-mode loopback \
+              --passphrase "$DATA_PASSPHRASE" \
+              --decrypt data.tar.gz.gpg | tar xz
+          ls -la product_names.json
+
+      - name: Materialize competitor list
+        env:
+          COMPETITORS_JSON: ${{ secrets.COMPETITORS_JSON }}
+        run: |
+          # Competitor domains are kept out of this PUBLIC repo. CI writes the
+          # file from a secret; the re-encrypt step folds it into the bundle.
+          if [ -n "${COMPETITORS_JSON:-}" ]; then
+            printf '%s' "$COMPETITORS_JSON" > competitors.json
+            echo "Wrote competitors.json from secret"
+          elif [ -f competitors.json ]; then
+            echo "Using competitors.json from bundle"
+          else
+            echo "WARNING: COMPETITORS_JSON secret unset and none in bundle — scrape will be skipped"
+          fi
+
+      - name: Materialize reprice brand list
+        env:
+          REPRICE_BRANDS: ${{ secrets.REPRICE_BRANDS }}
+        run: |
+          # Brands whose parts get competitor repricing despite the dual-source
+          # skip (e.g. SEBO). Kept out of the public repo, same as competitors.
+          if [ -n "${REPRICE_BRANDS:-}" ]; then
+            printf '%s' "$REPRICE_BRANDS" > reprice_brands.json
+            echo "Wrote reprice_brands.json from secret"
+          elif [ -f reprice_brands.json ]; then
+            echo "Using reprice_brands.json from bundle"
+          else
+            echo '[]' > reprice_brands.json
+            echo "WARNING: REPRICE_BRANDS secret unset and none in bundle — no reprice targets this run"
+          fi
+
+      - name: Refresh reprice targets (and MAP-lock machines)
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+        run: |
+          # Re-pulls the brand catalogs from Shopify so newly added parts get
+          # targeted and newly added machines get price-locked. Preserves
+          # ref_price floor anchors for SKUs already targeted.
+          python build_reprice_targets.py
+
       - name: Scrape competitor prices (async)
-        run: python scrape_competitor_prices.py
+        run: |
+          if python -c "import json,sys; d=json.load(open('competitors.json')); sys.exit(0 if d.get('competitors') else 1)" 2>/dev/null; then
+            python scrape_competitor_prices.py
+          else
+            echo "No competitors.json with domains — skipping scrape"
+          fi
 
       - name: Calculate competitive pricing decisions
-        run: python calculate_competitive_prices.py 2>&1 | tee /tmp/pricing_output.txt
+        run: |
+          if [ -f competitor_prices.json ]; then
+            python calculate_competitive_prices.py 2>&1 | tee /tmp/pricing_output.txt
+          else
+            echo "No competitor_prices.json — skipping calculation" | tee /tmp/pricing_output.txt
+          fi
+
+      - name: Re-encrypt and commit data bundle
+        if: always()
+        env:
+          DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          FILES=""
+          for f in product_names.json shopify_product_map.json price_locks.json \
+                   competitor_prices.json bulk_import_progress.json \
+                   missing_import_progress.json dual_source_skus.json \
+                   dual_source_brands.json competitors.json reprice_brands.json \
+                   reprice_targets.json; do
+            [ -f "$f" ] && FILES="$FILES $f"
+          done
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz $FILES
+          NEW_HASH=$(sha256sum data.tar.gz | cut -d' ' -f1)
+          OLD_HASH=$(cat .data-bundle.hash 2>/dev/null || true)
+          if [ "$NEW_HASH" = "$OLD_HASH" ]; then
+            echo "Bundle contents unchanged (sha256=$NEW_HASH) — skipping commit"
+            rm data.tar.gz
+            exit 0
+          fi
+          echo "$NEW_HASH" > .data-bundle.hash
+          gpg --batch --yes --quiet --pinentry-mode loopback \
+              --passphrase "$DATA_PASSPHRASE" --cipher-algo AES256 \
+              --symmetric --output data.tar.gz.gpg data.tar.gz
+          rm data.tar.gz
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.tar.gz.gpg .data-bundle.hash
+          git commit -m "data: refresh competitor prices + reprice targets (run ${GITHUB_RUN_ID})"
+          git push
 
       - name: Build email report
         if: always()

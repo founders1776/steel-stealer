@@ -345,6 +345,21 @@ Phase 3c: Automated Stock & Price Sync
     - product_id not in bulk_import_progress / missing_import_progress
       → skip (pre-existing Shopify product, not our import)]
        |
+  [Competitor reprice pass — runs FIRST, no browser needed:
+    reprice_targets.json (built by build_reprice_targets.py) lists
+    dual-source brand parts/accessories (e.g. SEBO) that still follow
+    competitor pricing even though their stock is never synced.
+    Per target SKU:
+    - in price_locks.json (machines auto-locked at MAP) → skip
+    - no validated competitor price → NO CHANGE (markup fallback
+      NEVER applies — these prices aren't Steel City cost-derived)
+    - undercut: beat lowest by $1, else tiered avg undercut
+    - floor: break_even(dealer_cost) when Steel City carries the SKU,
+      else ref_price × 0.70 (ref_price = store price when first
+      targeted; preserved across rebuilds so the floor can't ratchet)
+    - PUT variant price only — never stock/status/inventory
+    `--reprice-only` flag runs just this pass (no browser, fast)]
+       |
   [Launch browser → login to Steel City → batch API calls (8 concurrent)]
        |
   [Compare current vs stored: stock status + dealer cost]
@@ -363,6 +378,32 @@ Phase 3c: Automated Stock & Price Sync
   sync_log.json  ← Append-only change log
        |
   .github/workflows/sync-stock-prices.yml  ← Cron: 6am + 6pm UTC
+
+Phase 4: Weekly Competitor Price Refresh
+──────────────────────────────────────────
+  .github/workflows/scrape-competitor-prices.yml  ← Cron: Sun 2am UTC
+       |
+  [Decrypt data bundle → materialize competitors.json + reprice_brands.json
+   from secrets (COMPETITORS_JSON / REPRICE_BRANDS; both kept out of the
+   public repo, folded into the bundle on re-encrypt)]
+       |
+  [build_reprice_targets.py — refreshed every run:
+    - fetches each reprice brand's full catalog from Shopify by vendor
+    - complete machines (title pattern + price ≥ $380) → merged into
+      price_locks.json at current store price (MAP) — never repriced
+    - everything else → reprice_targets.json with variant ids,
+      dealer_cost from product_names.json when Steel City carries it,
+      and ref_price floor anchor (preserved for existing targets)]
+       |
+  [scrape_competitor_prices.py — product_names SKUs + reprice target
+   SKUs merged in → async Shopify suggest API across competitors.json]
+       |
+  competitor_prices.json  ← SKU → {avg, min, per-domain prices}
+       |
+  [calculate_competitive_prices.py → pricing_decisions.json (email report)]
+       |
+  [Re-encrypt bundle + commit → the 12h sync applies the new prices
+   (Steel City SKUs in its main loop, reprice targets in its pass)]
 ```
 
 ## Key Files
@@ -402,6 +443,13 @@ Phase 3c: Automated Stock & Price Sync
 | `dual_source_skus.json` | Phase 3c — per-SKU exclusion list (skip stock/price sync; available from other dealers) |
 | `dual_source_brands.json` | Phase 3c — brand-wide exclusion list (e.g. `["SEBO"]`); any product with matching brand skipped entirely |
 | `restore_dual_source.py` | Phase 3c — cleanup: scans the LIVE store by vendor (dual_source_brands) + dual_source_skus and re-untracks/reactivates products flipped to inventory_management=shopify+deny or draft by a prior sync |
+| `reprice_brands.json` | Phase 4 — brands whose parts get competitor repricing despite the dual-source skip (e.g. `["SEBO"]`); CI materializes from REPRICE_BRANDS secret |
+| `build_reprice_targets.py` | Phase 4 — builds reprice_targets.json from the live store per reprice brand; auto-locks complete machines into price_locks.json (MAP) |
+| `reprice_targets.json` | Phase 4 — competitor-undercut allowlist: SKU → {variant_id, dealer_cost, ref_price floor anchor, last_applied} |
+| `scrape_competitor_prices.py` | Phase 4 — async competitor price scrape (product_names SKUs + reprice targets) |
+| `competitor_prices.json` | Phase 4 — aggregated competitor prices per SKU (consumed by the sync's pricing) |
+| `calculate_competitive_prices.py` | Phase 4 — pricing decision report (pricing_decisions.json, emailed weekly) |
+| `.github/workflows/scrape-competitor-prices.yml` | Phase 4 — weekly competitor refresh (Sun 2am UTC), re-encrypts bundle |
 | `shopify_product_map.json` | Phase 3c — SKU → {product_id, variant_id, vendor} mapping (vendor drives dual-source skip) |
 | `sync_log.json` | Phase 3c — append-only log of all sync runs |
 | `.github/workflows/sync-stock-prices.yml` | Phase 3c — GitHub Actions cron (6am + 6pm UTC) |
@@ -539,4 +587,11 @@ python3 shopify_upload.py upload            # Upload to Shopify + generate CSV
 python3 build_shopify_map.py               # One-time: build SKU → Shopify ID mapping
 python3 sync_stock_prices.py               # Full sync (resumable)
 python3 sync_stock_prices.py --dry-run     # Preview changes without touching Shopify
+python3 sync_stock_prices.py --reprice-only --dry-run  # Just the competitor reprice pass (no browser)
+
+# Phase 4 — Competitor repricing
+python3 build_reprice_targets.py           # Refresh reprice_targets.json + auto-lock machines (reads Shopify)
+python3 build_reprice_targets.py --dry-run # Report counts without writing
+python3 scrape_competitor_prices.py        # Async competitor price scrape (~30-60 min)
+python3 calculate_competitive_prices.py --dry-run  # Pricing decision report
 ```

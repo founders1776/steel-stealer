@@ -86,11 +86,17 @@ jobs:
           DATA_PASSPHRASE: ${{ secrets.DATA_PASSPHRASE }}
         run: |
           set -euo pipefail
-          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz \
-            product_names.json shopify_product_map.json price_locks.json \
-            competitor_prices.json bulk_import_progress.json \
-            missing_import_progress.json dual_source_skus.json \
-            dual_source_brands.json
+          # Keep this list in sync with scrape-competitor-prices.yml — a tar
+          # list mismatch would silently drop files from the bundle.
+          FILES=""
+          for f in product_names.json shopify_product_map.json price_locks.json \
+                   competitor_prices.json bulk_import_progress.json \
+                   missing_import_progress.json dual_source_skus.json \
+                   dual_source_brands.json competitors.json reprice_brands.json \
+                   reprice_targets.json; do
+            [ -f "$f" ] && FILES="$FILES $f"
+          done
+          tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz $FILES
           NEW_HASH=$(sha256sum data.tar.gz | cut -d' ' -f1)
           OLD_HASH=$(cat .data-bundle.hash 2>/dev/null || true)
           if [ "$NEW_HASH" = "$OLD_HASH" ]; then

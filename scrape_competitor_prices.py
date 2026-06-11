@@ -36,6 +36,7 @@ import requests  # fallback for single-request operations
 
 BASE_DIR = Path(__file__).parent
 PRODUCTS_FILE = BASE_DIR / "product_names.json"
+REPRICE_TARGETS_FILE = BASE_DIR / "reprice_targets.json"
 COMPETITORS_FILE = BASE_DIR / "competitors.json"
 PROGRESS_FILE = BASE_DIR / "competitor_price_progress.json"
 OUTPUT_FILE = BASE_DIR / "competitor_prices.json"
@@ -296,6 +297,22 @@ def main():
         if sku not in seen:
             skus_with_products.append((sku, prod))
             seen.add(sku)
+
+    # Reprice targets (dual-source brand parts, e.g. SEBO) aren't all Steel
+    # City products, so merge any extra SKUs in. price_is_sane gets ref_price
+    # (our retail) when there's no dealer cost — the 0.5x-5x band still
+    # filters out wrong-product matches.
+    if REPRICE_TARGETS_FILE.exists():
+        targets = {k: v for k, v in json.loads(REPRICE_TARGETS_FILE.read_text()).items()
+                   if not k.startswith("_")}
+        added = 0
+        for sku, target in targets.items():
+            if sku not in seen:
+                ref = target.get("dealer_cost") or target.get("ref_price")
+                skus_with_products.append((sku, {"price": str(ref or "")}))
+                seen.add(sku)
+                added += 1
+        log.info(f"Reprice targets merged: +{added} SKUs")
 
     log.info(f"Total unique SKUs: {len(skus_with_products)}")
 

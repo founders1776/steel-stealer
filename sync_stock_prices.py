@@ -50,6 +50,7 @@ PRICE_LOCKS_FILE = BASE_DIR / "price_locks.json"
 COMPETITOR_PRICES_FILE = BASE_DIR / "competitor_prices.json"
 DUAL_SOURCE_FILE = BASE_DIR / "dual_source_skus.json"
 DUAL_SOURCE_BRANDS_FILE = BASE_DIR / "dual_source_brands.json"
+REPRICE_TARGETS_FILE = BASE_DIR / "reprice_targets.json"
 
 SHOPIFY_STORE = os.environ.get("SHOPIFY_STORE", "")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN", "")
@@ -138,17 +139,13 @@ def get_undercut(competitor_avg):
     return UNDERCUT_TIERS[-1][1]
 
 
-def get_best_price(sku, dealer_cost, competitor_prices):
-    """Return best price: beat lowest competitor by $1 if profitable, else avg undercut, else markup."""
-    markup_price = calculate_retail_price(dealer_cost)
+def filter_competitor_prices(sku, ref_price, comp_data):
+    """Filter out mismatched competitor entries (accessories, wrong models).
 
-    comp_data = competitor_prices.get(sku)
-    if not comp_data or comp_data.get("num_competitors", 0) == 0:
-        return markup_price, "markup"
-
-    # Filter out mismatched competitor entries (accessories, wrong models)
-    # Only keep prices within 0.5x-5x of our dealer cost, and where
-    # our SKU actually appears in the matched product's title or URL path
+    Only keep prices within 0.5x-5x of ref_price (our dealer cost, or current
+    retail when no cost is known), and where our SKU actually appears in the
+    matched product's title or URL path.
+    """
     sku_lower = sku.lower()
     sku_norm = re.sub(r'[\-\s\.]', '', sku).lower()
     valid_prices = []
@@ -156,7 +153,7 @@ def get_best_price(sku, dealer_cost, competitor_prices):
         if not cdata or not cdata.get("price"):
             continue
         # Price ratio check
-        ratio = cdata["price"] / dealer_cost if dealer_cost > 0 else 1
+        ratio = cdata["price"] / ref_price if ref_price and ref_price > 0 else 1
         if not (0.50 <= ratio <= 5.0):
             continue
         # SKU presence check (title + URL path, not query string)
@@ -167,28 +164,162 @@ def get_best_price(sku, dealer_cost, competitor_prices):
         if sku_lower not in comp_text and sku_norm not in comp_text_norm:
             continue
         valid_prices.append(cdata["price"])
+    return valid_prices
 
-    if not valid_prices:
-        return markup_price, "markup"
 
-    break_even = calculate_break_even(dealer_cost)
+def competitive_target(valid_prices, floor):
+    """Undercut price from validated competitor prices, or None if all targets
+    fall below floor: beat lowest by $1, else tiered undercut off the average."""
     competitor_min = min(valid_prices)
     competitor_avg = sum(valid_prices) / len(valid_prices)
 
     # Try to beat lowest competitor by $1
     target_min = charm_price(competitor_min - 1.00)
     target_min = max(target_min, MIN_PRICE)
-    if target_min >= break_even:
-        return target_min, "competitor"
+    if target_min >= floor:
+        return target_min
 
     # Can't beat lowest — try average with tiered undercut
     undercut = get_undercut(competitor_avg)
     target_avg = charm_price(competitor_avg - undercut)
     target_avg = max(target_avg, MIN_PRICE)
-    if target_avg >= break_even:
-        return target_avg, "competitor"
+    if target_avg >= floor:
+        return target_avg
+
+    return None
+
+
+def get_best_price(sku, dealer_cost, competitor_prices):
+    """Return best price: beat lowest competitor by $1 if profitable, else avg undercut, else markup."""
+    markup_price = calculate_retail_price(dealer_cost)
+
+    comp_data = competitor_prices.get(sku)
+    if not comp_data or comp_data.get("num_competitors", 0) == 0:
+        return markup_price, "markup"
+
+    valid_prices = filter_competitor_prices(sku, dealer_cost, comp_data)
+    if not valid_prices:
+        return markup_price, "markup"
+
+    target = competitive_target(valid_prices, calculate_break_even(dealer_cost))
+    if target is not None:
+        return target, "competitor"
 
     return markup_price, "markup"
+
+
+# Floor for reprice targets with no dealer cost: never drop below this
+# fraction of ref_price (the store price when the SKU was first targeted).
+REPRICE_NO_COST_FLOOR = 0.70
+
+
+def run_reprice_targets(competitor_prices, price_locks, products, progress,
+                        changes, dry_run=False):
+    """Competitor-undercut pass for reprice_targets.json (dual-source brands
+    like SEBO whose parts follow competitor pricing but are never stock-synced
+    against Steel City).
+
+    Strictly competitor-driven: a SKU with no validated competitor price is
+    left untouched — the tiered-markup fallback NEVER applies here, because
+    these prices were not derived from Steel City costs to begin with.
+    Machines stay frozen via price_locks. No stock/status changes ever.
+    """
+    if not REPRICE_TARGETS_FILE.exists():
+        log.info("No reprice_targets.json — skipping reprice pass")
+        return
+
+    with open(REPRICE_TARGETS_FILE) as f:
+        targets = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+    sku_to_key = {}
+    for key, product in products.items():
+        sku_to_key.setdefault(product.get("sku", key), key)
+
+    already = set(progress.setdefault("repriced_skus", []))
+    log.info(f"Reprice targets: {len(targets)} ({len(already)} already done this run)")
+
+    stats = {"repriced": 0, "no_data": 0, "below_floor": 0, "unchanged": 0, "locked": 0}
+    dirty = False
+    for sku, target in targets.items():
+        if sku in already:
+            continue
+        progress["repriced_skus"].append(sku)
+
+        if sku in price_locks:
+            stats["locked"] += 1
+            continue
+
+        comp_data = competitor_prices.get(sku)
+        if not comp_data or comp_data.get("num_competitors", 0) == 0:
+            stats["no_data"] += 1
+            continue
+
+        dealer_cost = target.get("dealer_cost")
+        ref_price = target.get("ref_price")
+        if dealer_cost:
+            floor = calculate_break_even(dealer_cost)
+        elif ref_price:
+            floor = ref_price * REPRICE_NO_COST_FLOOR
+        else:
+            stats["no_data"] += 1
+            continue
+
+        valid_prices = filter_competitor_prices(sku, dealer_cost or ref_price, comp_data)
+        if not valid_prices:
+            stats["no_data"] += 1
+            continue
+
+        new_retail = competitive_target(valid_prices, floor)
+        if new_retail is None:
+            stats["below_floor"] += 1
+            continue
+
+        old_retail = target.get("last_applied") or ref_price or 0
+        if abs(new_retail - old_retail) < 0.01:
+            stats["unchanged"] += 1
+            continue
+
+        direction = "UP" if new_retail > old_retail else "DOWN"
+        log.info(f"  REPRICE {direction} (competitor, SKU redacted)")
+        if not dry_run:
+            ok = update_variant_price(target["variant_id"], new_retail, dealer_cost)
+            if not ok:
+                changes["errors"].append({"sku": sku, "error": "reprice_failed"})
+                continue
+            target["last_applied"] = new_retail
+            dirty = True
+            key = sku_to_key.get(sku)
+            if key:
+                products[key]["retail_price"] = f"${new_retail:.2f}"
+            time.sleep(0.55)
+
+        changes["price_updated"].append({
+            "sku": sku,
+            "old_cost": f"${dealer_cost:.2f}" if dealer_cost else "n/a",
+            "new_cost": f"${dealer_cost:.2f}" if dealer_cost else "n/a",
+            "old_retail": f"${old_retail:.2f}" if old_retail else "?",
+            "new_retail": f"${new_retail:.2f}",
+            "method": "competitor_reprice",
+        })
+        stats["repriced"] += 1
+
+        if stats["repriced"] % 50 == 0:
+            save_sync_progress(progress)
+
+    if dirty:
+        out = {"_comment": (
+            "Competitor-undercut allowlist built by build_reprice_targets.py. "
+            "sync_stock_prices.py reprices these SKUs from competitor_prices.json "
+            "only (never markup fallback); no stock changes. ref_price anchors the "
+            "price floor for SKUs without dealer cost.")}
+        out.update(dict(sorted(targets.items())))
+        with open(REPRICE_TARGETS_FILE, "w") as f:
+            json.dump(out, f, indent=2)
+
+    save_sync_progress(progress)
+    log.info(f"Reprice pass: {stats['repriced']} repriced, {stats['unchanged']} unchanged, "
+             f"{stats['no_data']} no competitor data, {stats['below_floor']} below floor, "
+             f"{stats['locked']} MAP-locked")
 
 
 # ── Browser helpers (from check_stock.py) ───────────────────────────────────
@@ -562,12 +693,13 @@ def set_product_status(product_id, status):
 
 
 def update_variant_price(variant_id, retail_price, cost):
-    """Update variant price and cost on Shopify."""
+    """Update variant price (and cost, when known) on Shopify."""
     payload = {"variant": {
         "id": int(variant_id),
         "price": f"{retail_price:.2f}",
-        "cost": f"{cost:.2f}",
     }}
+    if cost is not None:
+        payload["variant"]["cost"] = f"{cost:.2f}"
     try:
         data, code = shopify_put(f"variants/{variant_id}.json", payload)
         return data is not None
@@ -595,7 +727,7 @@ def save_sync_progress(progress):
 
 # ── Main sync logic ────────────────────────────────────────────────────────
 
-def run_sync(driver, dry_run=False):
+def run_sync(driver, dry_run=False, reprice_only=False):
     # Load data
     with open(PRODUCTS_FILE) as f:
         products = json.load(f)
@@ -703,6 +835,15 @@ def run_sync(driver, dry_run=False):
     log.info(f"Already checked: {len(already_checked)}, remaining: {len(remaining)}")
 
     changes = progress["changes"]
+
+    # Competitor-undercut pass for dual-source brand parts (SEBO etc.) —
+    # price-only, driven by reprice_targets.json, no Steel City involved.
+    run_reprice_targets(competitor_prices, price_locks, products, progress,
+                        changes, dry_run=dry_run)
+
+    if reprice_only:
+        log.info("Reprice-only mode — skipping Steel City stock/price sync")
+        remaining = []
 
     # Process in batches
     for i in range(0, len(remaining), BATCH_SIZE):
@@ -887,8 +1028,11 @@ def run_sync(driver, dry_run=False):
     with open(SYNC_LOG_FILE, "w") as f:
         json.dump(sync_log, f, indent=2)
 
-    # Clean up progress file on successful completion
-    if SYNC_PROGRESS_FILE.exists():
+    # Clean up progress file on successful completion. A reprice-only run
+    # must not clobber a full sync's resume state (checked_skus), but if
+    # there is none, leaving the file would make the next run skip every
+    # reprice target.
+    if SYNC_PROGRESS_FILE.exists() and not (reprice_only and progress["checked_skus"]):
         SYNC_PROGRESS_FILE.unlink()
 
     # Full summary (with SKUs) goes to the email only. stdout is the public CI
@@ -970,6 +1114,8 @@ def main():
     parser = argparse.ArgumentParser(description="Sync stock & prices from Steel City to Shopify")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview changes without updating Shopify")
+    parser.add_argument("--reprice-only", action="store_true",
+                        help="Run only the competitor reprice pass (no Steel City browser)")
     args = parser.parse_args()
 
     if not SHOPIFY_STORE or not SHOPIFY_ACCESS_TOKEN:
@@ -979,9 +1125,10 @@ def main():
 
     driver = None
     try:
-        driver = create_driver()
-        login(driver)
-        run_sync(driver, dry_run=args.dry_run)
+        if not args.reprice_only:
+            driver = create_driver()
+            login(driver)
+        run_sync(driver, dry_run=args.dry_run, reprice_only=args.reprice_only)
     except KeyboardInterrupt:
         log.info("\nInterrupted — progress saved. Re-run to resume.")
     except Exception as e:

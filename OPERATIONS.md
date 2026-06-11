@@ -70,7 +70,11 @@ The sync is **resumable** — if it crashes mid-run, just re-run and it picks up
 ### What Are Price Locks?
 Some products have Minimum Advertised Price (MAP) requirements from the manufacturer. The sync must never auto-update these prices.
 
-### Currently Locked: 15 Titan Vacuum Machines
+### Currently Locked
+
+**15 Titan vacuum machines** (manually verified MAP, 2026-03-19) plus **32 SEBO complete machines** auto-locked by `build_reprice_targets.py` at their store price (AIRBELT / AUTOMATIC X / FELIX / DART / MECHANICAL / ESSENTIAL G / DUO Brush Machine / DISCO Floor Polisher). SEBO machines are MAP-protected; their parts and accessories are NOT locked — they follow competitor repricing (see §2b).
+
+Titan machines:
 
 | SKU | Model | MAP Price |
 |---|---|---|
@@ -101,7 +105,27 @@ Some products have Minimum Advertised Price (MAP) requirements from the manufact
 The value is just for your reference — the sync reads the key (SKU) to know what to skip.
 
 ### How to Remove a Price Lock
-Delete the SKU line from `price_locks.json`. The sync will start managing that SKU's price again.
+Delete the SKU line from `price_locks.json`. The sync will start managing that SKU's price again. Note: SEBO machine locks are re-added automatically by `build_reprice_targets.py` (weekly in CI) — to permanently unlock a machine you'd have to change the `MACHINE_TITLE` pattern in that script.
+
+---
+
+## 2b. Competitor Repricing for Dual-Source Brands (SEBO)
+
+Dual-source brands (SEBO etc., see `dual_source_brands.json`) are skipped by the stock sync entirely — their inventory is never tracked against Steel City. But their **parts/accessories/attachments still follow competitor pricing**, via a separate price-only pass:
+
+- **`reprice_brands.json`** (`["SEBO"]`) — which dual-source brands get competitor repricing. In CI this comes from the `REPRICE_BRANDS` secret.
+- **`build_reprice_targets.py`** — pulls the brand's full catalog from Shopify by vendor, auto-locks complete machines into `price_locks.json` (MAP), writes everything else to `reprice_targets.json`. Runs weekly in CI; run locally after SEBO catalog changes.
+- **`reprice_targets.json`** — ~1,182 SEBO SKUs. The 12h sync reprices them from `competitor_prices.json` BEFORE the Steel City loop: beat lowest competitor by $1, else tiered average undercut. **Strictly competitor-driven** — no competitor data means no change (the markup tiers never apply here).
+- **Price floor**: `break_even(dealer_cost)` for the ~282 SKUs Steel City carries; for the rest, **70% of `ref_price`** (the store price when the SKU was first targeted — preserved across rebuilds, so repeated undercutting can't ratchet prices to zero).
+- **Never touches stock, status, or inventory tracking** on these products.
+
+Run just this pass (fast, no Steel City browser):
+```bash
+python3 sync_stock_prices.py --reprice-only --dry-run   # preview
+python3 sync_stock_prices.py --reprice-only             # apply
+```
+
+The weekly scrape workflow (`scrape-competitor-prices.yml`, Sun 2am UTC) now decrypts/re-encrypts the data bundle like the sync does, so competitor data actually refreshes in CI. It needs the `COMPETITORS_JSON` and `REPRICE_BRANDS` secrets set once (contents of the local `competitors.json` / `reprice_brands.json`).
 
 ---
 
