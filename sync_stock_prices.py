@@ -711,7 +711,7 @@ def run_sync(driver, dry_run=False):
                 cached_desc = product.get("raw_description", "")
                 cached_price = product.get("price")
                 if cached_name and cached_price:
-                    log.info(f"  API miss for {sku}, using cached data (name={cached_name[:30]})")
+                    log.info("  API miss, using cached data (SKU redacted — public CI log)")
                     api_data = {"name": cached_name, "description": cached_desc, "price": cached_price}
                 else:
                     changes["errors"].append({"sku": sku, "error": "no_api_data"})
@@ -724,7 +724,7 @@ def run_sync(driver, dry_run=False):
             is_nla = "NLA" in api_name or "NLA" in api_desc or \
                      "NO LONGER AVAILABLE" in api_name or "NO LONGER AVAILABLE" in api_desc
             if is_nla:
-                log.info(f"  NLA: {sku} (keep active, mark discontinued) ({product.get('clean_name', '')[:40]})")
+                log.info("  NLA: keep active, mark discontinued")
                 if not dry_run:
                     # Keep product active for SEO indexing but make unbuyable
                     if variant_id:
@@ -738,7 +738,7 @@ def run_sync(driver, dry_run=False):
                         ]}}
                         shopify_put(f"products/{product_id}.json", nla_payload)
                     except Exception as e:
-                        log.debug(f"  NLA metafield failed for {sku}: {e}")
+                        log.debug(f"  NLA metafield failed: {e}")
                     time.sleep(0.55)
                 changes["drafted"].append(sku)  # log key kept for back-compat
                 products[key]["in_stock"] = "0"
@@ -766,7 +766,7 @@ def run_sync(driver, dry_run=False):
                 # Was available → now out of stock.
                 # SEO-friendly: keep product Active but unbuyable so the URL
                 # stays indexed by Google. Customer cannot purchase (deny + 0 qty).
-                log.info(f"  OOS: {sku} (qty=0, keep published, unbuyable) ({product.get('clean_name', '')[:40]})")
+                log.info("  OOS: qty=0, keep published, unbuyable")
                 if not dry_run:
                     if variant_id:
                         ok = set_oos_unbuyable(product_id, variant_id)
@@ -778,7 +778,7 @@ def run_sync(driver, dry_run=False):
 
             elif not was_in_stock and now_in_stock:
                 # Was out → now back in stock: bump inventory level
-                log.info(f"  RESTOCK: {sku} (qty={new_qty}) ({product.get('clean_name', '')[:40]})")
+                log.info(f"  RESTOCK: qty={new_qty}")
                 if not dry_run:
                     if variant_id:
                         ok = set_in_stock(product_id, variant_id, new_qty)
@@ -806,8 +806,7 @@ def run_sync(driver, dry_run=False):
 
                 if cost_changed or price_changed:
                     direction = "UP" if new_retail > old_retail else "DOWN" if new_retail < old_retail else "COST"
-                    log.info(f"  PRICE {direction}: {sku} cost ${old_cost or 0:.2f}→${new_cost:.2f}, "
-                             f"retail ${old_retail:.2f}→${new_retail:.2f} ({price_method})")
+                    log.info(f"  PRICE {direction} ({price_method})")
 
                     if not dry_run:
                         ok = update_variant_price(variant_id, new_retail, new_cost)
@@ -871,11 +870,12 @@ def run_sync(driver, dry_run=False):
     if SYNC_PROGRESS_FILE.exists():
         SYNC_PROGRESS_FILE.unlink()
 
-    # Print summary
+    # Full summary (with SKUs) goes to the email only. stdout is the public CI
+    # log, so print a counts-only version with SKUs redacted.
     summary = build_summary(log_entry)
-    print(summary)
+    print(build_summary(log_entry, redact=True))
 
-    # Output summary for GitHub Actions
+    # Output full summary for GitHub Actions → email (private to the owner)
     if os.environ.get("GITHUB_OUTPUT"):
         # Write multiline output
         with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -884,8 +884,12 @@ def run_sync(driver, dry_run=False):
     return log_entry
 
 
-def build_summary(log_entry):
-    """Build human-readable email summary."""
+def build_summary(log_entry, redact=False):
+    """Build human-readable sync summary.
+
+    redact=True omits the per-SKU detail (and dealer costs) for the PUBLIC CI
+    log; the full version with SKUs goes only to the owner's email.
+    """
     lines = [
         "=" * 50,
         "STEEL STEALER SYNC REPORT",
@@ -899,36 +903,40 @@ def build_summary(log_entry):
     drafted = log_entry["drafted"]
     if drafted:
         lines.append(f"DRAFTED (out of stock): {len(drafted)}")
-        for sku in drafted[:20]:
-            lines.append(f"  - {sku}")
-        if len(drafted) > 20:
-            lines.append(f"  ... and {len(drafted) - 20} more")
+        if not redact:
+            for sku in drafted[:20]:
+                lines.append(f"  - {sku}")
+            if len(drafted) > 20:
+                lines.append(f"  ... and {len(drafted) - 20} more")
         lines.append("")
 
     activated = log_entry["activated"]
     if activated:
         lines.append(f"REACTIVATED (back in stock): {len(activated)}")
-        for sku in activated[:20]:
-            lines.append(f"  - {sku}")
-        if len(activated) > 20:
-            lines.append(f"  ... and {len(activated) - 20} more")
+        if not redact:
+            for sku in activated[:20]:
+                lines.append(f"  - {sku}")
+            if len(activated) > 20:
+                lines.append(f"  ... and {len(activated) - 20} more")
         lines.append("")
 
     price_updated = log_entry["price_updated"]
     if price_updated:
         lines.append(f"PRICE INCREASED: {len(price_updated)}")
-        for p in price_updated[:20]:
-            lines.append(f"  - {p['sku']}: cost {p['old_cost']}→{p['new_cost']}, "
-                        f"retail {p['old_retail']}→{p['new_retail']}")
-        if len(price_updated) > 20:
-            lines.append(f"  ... and {len(price_updated) - 20} more")
+        if not redact:
+            for p in price_updated[:20]:
+                lines.append(f"  - {p['sku']}: cost {p['old_cost']}→{p['new_cost']}, "
+                            f"retail {p['old_retail']}→{p['new_retail']}")
+            if len(price_updated) > 20:
+                lines.append(f"  ... and {len(price_updated) - 20} more")
         lines.append("")
 
     errors = log_entry["errors"]
     if errors:
         lines.append(f"ERRORS: {len(errors)}")
-        for e in errors[:10]:
-            lines.append(f"  - {e.get('sku', '?')}: {e.get('error', '?')}")
+        if not redact:
+            for e in errors[:10]:
+                lines.append(f"  - {e.get('sku', '?')}: {e.get('error', '?')}")
         lines.append("")
 
     if not drafted and not activated and not price_updated:
