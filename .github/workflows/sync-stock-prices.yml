@@ -37,6 +37,39 @@ jobs:
               --decrypt data.tar.gz.gpg | tar xz
           ls -la product_names.json shopify_product_map.json
 
+      - name: Materialize dual-source brand list
+        env:
+          DUAL_SOURCE_BRANDS: ${{ secrets.DUAL_SOURCE_BRANDS }}
+        run: |
+          # Brand list is kept out of this PUBLIC repo. CI writes it from a
+          # secret, then the re-encrypt step folds it into the encrypted bundle
+          # (so later runs still have it if the secret is ever removed).
+          if [ -n "${DUAL_SOURCE_BRANDS:-}" ]; then
+            printf '%s' "$DUAL_SOURCE_BRANDS" > dual_source_brands.json
+            echo "Wrote dual_source_brands.json from secret"
+          elif [ -f dual_source_brands.json ]; then
+            echo "Using dual_source_brands.json from bundle"
+          else
+            echo '[]' > dual_source_brands.json
+            echo "WARNING: DUAL_SOURCE_BRANDS secret unset and none in bundle — dual-source skip disabled this run"
+          fi
+
+      - name: Ensure shopify map has vendor (one-time backfill)
+        env:
+          SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+        run: |
+          # The dual-source skip keys on the Shopify vendor stored in the map.
+          # Older bundles predate vendor capture — rebuild once, then the
+          # re-encrypt step ships the enriched map. Idempotent: a map that
+          # already carries vendor is left untouched.
+          if python -c "import json,sys; m=json.load(open('shopify_product_map.json')); sys.exit(0 if any(v.get('vendor') for v in m.values()) else 1)"; then
+            echo "Map already has vendor — skipping rebuild"
+          else
+            echo "Map missing vendor — rebuilding from Shopify"
+            python build_shopify_map.py
+          fi
+
       - name: Run sync
         id: sync
         env:
@@ -56,7 +89,8 @@ jobs:
           tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz \
             product_names.json shopify_product_map.json price_locks.json \
             competitor_prices.json bulk_import_progress.json \
-            missing_import_progress.json dual_source_skus.json
+            missing_import_progress.json dual_source_skus.json \
+            dual_source_brands.json
           NEW_HASH=$(sha256sum data.tar.gz | cut -d' ' -f1)
           OLD_HASH=$(cat .data-bundle.hash 2>/dev/null || true)
           if [ "$NEW_HASH" = "$OLD_HASH" ]; then

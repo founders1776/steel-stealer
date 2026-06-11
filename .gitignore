@@ -34,6 +34,7 @@ price_locks.json
 bulk_import_progress.json
 sync_log.json
 dual_source_skus.json
+dual_source_brands.json
 competitors.json
 pricing.md
 competitor_price_progress.json
