@@ -107,6 +107,22 @@ Phase 3b: generate_shopify_csv.py (~250 lines)
   +-- slugify() / parse_price()→ Handle + price helpers
   +-- get_image_src()          → CDN URL or local image path
   +-- generate_csv()           → Full pipeline: load → dedup → exclude → filter → tag → write CSV
+
+Dealer Sheet Import: sheet_import.py
+  |
+  +-- --step parse     → validate manifest from Claude-parsed dealer sheet
+  +-- --step match     → bucket SKUs vs live store (exact + O↔0 fuzzy within vendor;
+  |                       `new` double-checked live via GraphQL)
+  +-- --step research  → validate content/<sku>.json files (Claude agents write desc, SEO, image URLs)
+  +-- --step images    → download/validate/dedupe → images/<sku>/
+  +-- --step create    → draft products (MAP → MSRP → tiered markup; untracked inventory)
+  +-- --step update    → existing cards: cost+price always, images if <2,
+  |                       description if thin, SKU spelling fixes
+  +-- --step register  → price_locks.json += SKUs @ MAP; new brand →
+  |                       dual_source_brands.json; matched Steel City-tracked
+  |                       SKUs → dual_source_skus.json; rebuilds shopify_product_map.json
+  +-- --activate       → flip the run's drafts live after review
+  (helpers imported from import_missing_products.py: REST/GraphQL, tags, markup)
 ```
 
 ## Data Flow
@@ -404,7 +420,78 @@ Phase 4: Weekly Competitor Price Refresh
        |
   [Re-encrypt bundle + commit → the 12h sync applies the new prices
    (Steel City SKUs in its main loop, reprice targets in its pass)]
+
+Dealer Sheet Import
+────────────────────
+  dealer lists/<sheet>.xlsx / .pdf
+       |
+  [Claude parses sheet → sheet_imports/<brand>_<date>/manifest.json]
+       |
+  [--step match: bucket SKUs — exact match, O↔0 fuzzy (within vendor),
+   `new` double-checked live via GraphQL]
+       |
+  [Claude agents research each SKU → content/<sku>.json
+   (description, SEO title/meta, image URLs)]
+       |
+  [--step images: download + validate + dedupe → images/<sku>/]
+       |
+  [--step create: draft products (pricing: MAP → MSRP → tiered markup;
+   inventory_management=null, inventory_policy=continue — untracked)]
+       |
+  [--step update: existing cards — cost+price always; images if <2;
+   description if thin; SKU spelling fixes]
+       |
+  [--step register:
+    price_locks.json     += new SKUs @ MAP
+    dual_source_brands.json += brand if new (also update DUAL_SOURCE_BRANDS secret)
+    dual_source_skus.json   += matched Steel City-tracked SKUs
+    build_shopify_map.py    → rebuild shopify_product_map.json
+    sheet_imports/<run>/report.md]
+       |
+  [--activate: flip run's draft products live after manual review]
+       |
+  sheet_imports/<run>/report.md  ← Import summary
+  price_locks.json               ← Updated MAP locks
+  dual_source_brands.json        ← Updated brand exclusions
+  dual_source_skus.json          ← Updated per-SKU exclusions
+  shopify_product_map.json       ← Rebuilt SKU → variant mapping
 ```
+
+## Dealer Sheet Import (sheet_import.py)
+
+Imports products from manufacturer/distributor pricing sheets in `dealer lists/`.
+Separate from the Steel City pipeline — imported SKUs never enter
+bulk_import_progress.json (sync gate) and are price-locked at MAP.
+
+Flow per sheet:
+  dealer lists/<sheet>            (xlsx or PDF)
+    └─ Claude parses → sheet_imports/<brand>_<date>/manifest.json
+         └─ --step parse     validate manifest
+         └─ --step match     bucket vs live store (exact + O↔0 fuzzy within vendor;
+                             `new` double-checked live via GraphQL)
+         └─ Claude agents research → content/<sku>.json (desc, SEO, image URLs)
+         └─ --step research  validate content files
+         └─ --step images    download/validate/dedupe → images/<sku>/
+         └─ --step create    draft products (MAP → MSRP → tiered markup; untracked inventory)
+         └─ --step update    existing cards: cost+price always, images if <2,
+                             description if thin, SKU spelling fixes
+         └─ --step register  price_locks.json += SKUs @ MAP; new brand →
+                             dual_source_brands.json; matched Steel City-tracked
+                             SKUs → dual_source_skus.json; rebuilds
+                             shopify_product_map.json; writes report.md
+    └─ --activate            flip the run's drafts live after review
+
+Reads:  dealer lists/, sheet_imports/<run>/ (manifest, content, images)
+Writes: Shopify store (create/update), price_locks.json, dual_source_brands.json,
+        dual_source_skus.json, shopify_product_map.json (via build_shopify_map.py),
+        sheet_imports/<run>/report.md
+
+Ops notes:
+- After register: re-encrypt + commit the CI data bundle, else CI resurrects
+  stale registry files.
+- New brand: also update the DUAL_SOURCE_BRANDS GitHub secret — CI writes
+  dual_source_brands.json from the secret every run.
+- Helpers imported from import_missing_products.py (REST/GraphQL, tags, markup).
 
 ## Key Files
 
@@ -439,6 +526,9 @@ Phase 4: Weekly Competitor Price Refresh
 | `shopify_upload.py` | Phase 3 — upload images to Shopify Files, generate CSV (uses retail_price) |
 | `generate_shopify_csv.py` | Phase 3b — auto-tagged Shopify CSV from product_names.json (dedup + exclude existing) |
 | `build_shopify_map.py` | Phase 3c — builds SKU → {product_id, variant_id, vendor} mapping from Shopify (rerun after new products land) |
+| `sheet_import.py` | Dealer Sheet Import — parse/match/research/images/create/update/register/activate pipeline for manufacturer pricing sheets in `dealer lists/`; imported SKUs are MAP-locked and dual-sourced |
+| `sheet_imports/` | Dealer Sheet Import run directories — `<brand>_<date>/manifest.json`, `content/<sku>.json`, `images/<sku>/`, `report.md` |
+| `dealer lists/` | Source pricing sheets from manufacturers/distributors (xlsx or PDF) |
 | `sync_stock_prices.py` | Phase 3c — automated stock/price sync: Steel City → Shopify (12h cron) |
 | `dual_source_skus.json` | Phase 3c — per-SKU exclusion list (skip stock/price sync; available from other dealers) |
 | `dual_source_brands.json` | Phase 3c — brand-wide exclusion list (e.g. `["SEBO"]`); any product with matching brand skipped entirely |
