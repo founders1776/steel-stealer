@@ -132,7 +132,45 @@ def normalize_o0(sku):
 # ── Step stubs (implemented in later tasks) ──────────────────────────────────
 
 def step_parse_validate(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Validate a Claude-written manifest.json. Read-only."""
+    errors, flagged = [], []
+    seen = set()
+    for i, row in enumerate(manifest.get("rows", [])):
+        sku = str(row.get("sku", "")).strip()
+        if not sku:
+            errors.append(f"row {i}: empty sku")
+            continue
+        if sku in seen:
+            errors.append(f"row {i}: duplicate sku {sku} in manifest")
+        seen.add(sku)
+        cost = row.get("dealer_cost")
+        if not isinstance(cost, (int, float)) or cost <= 0:
+            errors.append(f"row {i} ({sku}): bad dealer_cost {cost!r}")
+            continue
+        map_price = row.get("map_price")
+        if map_price is not None:
+            if not isinstance(map_price, (int, float)) or map_price <= 0:
+                errors.append(f"row {i} ({sku}): bad map_price {map_price!r}")
+            elif map_price <= cost:
+                # MAP at or below dealer cost is suspicious (e.g. Lindhaus M28R
+                # nozzle listed $22.80/$22.80) — review, don't price blindly.
+                flagged.append(sku)
+        if not str(row.get("name", "")).strip():
+            errors.append(f"row {i} ({sku}): empty name")
+
+    if errors:
+        for e in errors:
+            log.error(f"  {e}")
+        log.error(f"manifest INVALID: {len(errors)} error(s)")
+        sys.exit(1)
+
+    progress["flagged_pricing"] = sorted(set(progress.get("flagged_pricing", []) + flagged))
+    if "parse" not in progress["steps_done"]:
+        progress["steps_done"].append("parse")
+    save_progress(run_dir, progress)
+    log.info(f"manifest OK: {len(manifest['rows'])} rows, "
+             f"{len(manifest.get('skipped_rows', []))} skipped at parse, "
+             f"{len(flagged)} flagged (MAP <= cost)")
 
 
 def step_match(run_dir, manifest, progress, dry_run=False):
