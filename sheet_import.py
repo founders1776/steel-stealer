@@ -478,7 +478,95 @@ def step_create(run_dir, manifest, progress, dry_run=False):
 
 
 def step_update(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Smart-update existing cards. MUTATES THE STORE unless --dry-run."""
+    rows = {str(r["sku"]).strip(): r for r in manifest["rows"]}
+    flagged = set(progress.get("flagged_pricing", []))
+    content_dir = run_dir / "content"
+    updated = progress.get("updated", {})
+    needs_enrichment = set(progress.get("needs_enrichment", []))
+
+    for sku, ids in progress["buckets"]["existing"].items():
+        if sku in updated:
+            continue
+        row = rows[sku]
+        changes = []
+
+        # Live product state — never decide off local data
+        resp = shopify_get(f"products/{ids['product_id']}.json")
+        live = resp.json()["product"]
+        time.sleep(0.3)
+
+        # 1) SKU spelling fix (sheet is authoritative)
+        fix = progress["buckets"]["sku_fixes"].get(sku)
+        if fix:
+            if dry_run:
+                log.info(f"  DRY {sku}: would fix store SKU {fix['store_sku']!r} -> {sku!r}")
+            else:
+                shopify_put(f"variants/{ids['variant_id']}.json",
+                            {"variant": {"id": int(ids["variant_id"]), "sku": sku}})
+                time.sleep(0.55)
+            changes.append(f"sku fixed from {fix['store_sku']}")
+
+        # 2) Cost + price (always). Flagged-pricing SKUs get cost only.
+        price, source = resolve_price(row, flagged)
+        variant_payload = {"id": int(ids["variant_id"]),
+                           "cost": f"{float(row['dealer_cost']):.2f}"}
+        if price is not None:
+            variant_payload["price"] = f"{price:.2f}"
+            changes.append(f"price ${price:.2f} ({source}), cost ${row['dealer_cost']:.2f}")
+        else:
+            changes.append(f"cost ${row['dealer_cost']:.2f} only ({source})")
+        if dry_run:
+            log.info(f"  DRY {sku}: {changes[-1]}")
+        else:
+            shopify_put(f"variants/{ids['variant_id']}.json", {"variant": variant_payload})
+            time.sleep(0.55)
+
+        # 3) Enrichment: images if sparse, description if thin
+        content_file = content_dir / f"{sku}.json"
+        wants_images = len(live.get("images", [])) < ENRICH_IMAGE_THRESHOLD
+        wants_desc = len(strip_html(live.get("body_html", ""))) < THIN_DESCRIPTION_CHARS
+        if (wants_images or wants_desc) and not content_file.exists():
+            needs_enrichment.add(sku)
+            log.info(f"  {sku}: needs enrichment ({'images' if wants_images else ''}"
+                     f"{'+' if wants_images and wants_desc else ''}"
+                     f"{'description' if wants_desc else ''}) — research it, then re-run update")
+        elif content_file.exists():
+            c = json.loads(content_file.read_text())
+            if wants_desc:
+                if dry_run:
+                    log.info(f"  DRY {sku}: would replace thin description")
+                else:
+                    shopify_put(f"products/{ids['product_id']}.json", {"product": {
+                        "id": int(ids["product_id"]),
+                        "body_html": c["body_html"],
+                        "metafields_global_title_tag": c.get("meta_title", ""),
+                        "metafields_global_description_tag": c.get("meta_description", ""),
+                    }})
+                    time.sleep(0.55)
+                changes.append("description rewritten")
+            if wants_images:
+                imgs = build_image_payloads(run_dir, sku)
+                for img in imgs:
+                    if dry_run:
+                        continue
+                    shopify_post(f"products/{ids['product_id']}/images.json", {"image": img})
+                    time.sleep(0.55)
+                if imgs:
+                    changes.append(f"{len(imgs)} image(s) added"
+                                   + (" [dry]" if dry_run else ""))
+
+        if not dry_run:
+            updated[sku] = changes
+            progress["updated"] = updated
+        progress["needs_enrichment"] = sorted(needs_enrichment)
+        save_progress(run_dir, progress)
+
+    if not dry_run and "update" not in progress["steps_done"]:
+        progress["steps_done"].append("update")
+        save_progress(run_dir, progress)
+    log.info(f"update: {len(updated)} cards updated, "
+             f"{len(needs_enrichment)} queued for enrichment research")
 
 
 def step_register(run_dir, manifest, progress, dry_run=False):
