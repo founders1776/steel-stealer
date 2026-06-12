@@ -493,6 +493,11 @@ def step_update(run_dir, manifest, progress, dry_run=False):
 
         # Live product state — never decide off local data
         resp = shopify_get(f"products/{ids['product_id']}.json")
+        if resp is None:
+            progress["failed"][sku] = "update skipped: product GET failed after retries"
+            save_progress(run_dir, progress)
+            log.error(f"  FAILED {sku}: product GET failed after retries — continuing")
+            continue
         live = resp.json()["product"]
         time.sleep(0.3)
 
@@ -555,6 +560,7 @@ def step_update(run_dir, manifest, progress, dry_run=False):
                 if imgs:
                     changes.append(f"{len(imgs)} image(s) added"
                                    + (" [dry]" if dry_run else ""))
+            needs_enrichment.discard(sku)
 
         if not dry_run:
             updated[sku] = changes
