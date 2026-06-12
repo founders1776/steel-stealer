@@ -322,9 +322,17 @@ IMG_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
 
 def step_images(run_dir, manifest, progress, dry_run=False):
-    """Download image_urls from content files into images/<sku>/NN.<ext>."""
-    from PIL import Image  # lazy: PIL only needed here
+    """Download image_urls from content files into images/<sku>/NN.jpg.
 
+    Every kept image gets the Steel City treatment so cards look uniform:
+    rembg background removal, then centered with padding on the 2048x2048
+    white canvas with the VaM logo watermark, saved as JPEG.
+    """
+    from PIL import Image  # lazy: PIL only needed here
+    from import_missing_products import (load_logo, create_background_with_logo,
+                                         process_single_image)
+
+    bg_canvas = create_background_with_logo(load_logo())
     content_dir = run_dir / "content"
     images_root = run_dir / "images"
     need = list(progress["buckets"]["new"]) + progress.get("needs_enrichment", [])
@@ -365,8 +373,13 @@ def step_images(run_dir, manifest, progress, dry_run=False):
             except Exception:
                 tmp.unlink()
                 continue
-            ext = {"jpeg": "jpg"}.get(fmt, fmt)
-            tmp.rename(sku_dir / f"{saved:02d}.{ext}")
+            try:
+                process_single_image(tmp, sku_dir / f"{saved:02d}.jpg", bg_canvas)
+            except Exception as e:
+                log.warning(f"  {sku}: processing failed for {url} ({e})")
+                tmp.unlink()
+                continue
+            tmp.unlink()
             seen_hashes.add(digest)
             saved += 1
             time.sleep(0.2)
