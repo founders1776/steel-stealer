@@ -15,8 +15,12 @@ For each brand in reprice_brands.json this script:
                                     floor anchor for SKUs with no dealer cost;
                                     preserved across rebuilds so repeated
                                     undercutting can't ratchet the floor down)
-       - dealer_cost               (from product_names.json when Steel City
-                                    carries the SKU, else null)
+       - dealer_cost               (Steel City's cost when they carry the SKU,
+                                    else null. ONLY a price floor: Steel City
+                                    marks these up vs the brand's own dealer
+                                    cost, so it must never be written to the
+                                    Shopify cost-per-item field — those hold
+                                    the true direct dealer costs)
 
 Idempotent: existing targets keep their ref_price; existing price locks are
 never overwritten. Safe to re-run after the brand's catalog changes.

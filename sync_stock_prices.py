@@ -282,7 +282,11 @@ def run_reprice_targets(competitor_prices, price_locks, products, progress,
         direction = "UP" if new_retail > old_retail else "DOWN"
         log.info(f"  REPRICE {direction} (competitor, SKU redacted)")
         if not dry_run:
-            ok = update_variant_price(target["variant_id"], new_retail, dealer_cost)
+            # cost=None: never write cost-per-item on these products. Their
+            # Shopify costs are the brand's direct dealer costs; the
+            # dealer_cost here is Steel City's marked-up reseller cost and
+            # is only valid as a price floor, not as the item cost.
+            ok = update_variant_price(target["variant_id"], new_retail, None)
             if not ok:
                 changes["errors"].append({"sku": sku, "error": "reprice_failed"})
                 continue
@@ -295,8 +299,8 @@ def run_reprice_targets(competitor_prices, price_locks, products, progress,
 
         changes["price_updated"].append({
             "sku": sku,
-            "old_cost": f"${dealer_cost:.2f}" if dealer_cost else "n/a",
-            "new_cost": f"${dealer_cost:.2f}" if dealer_cost else "n/a",
+            "old_cost": "untouched",
+            "new_cost": "untouched",
             "old_retail": f"${old_retail:.2f}" if old_retail else "?",
             "new_retail": f"${new_retail:.2f}",
             "method": "competitor_reprice",
