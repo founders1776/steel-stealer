@@ -112,7 +112,13 @@ def parse_price_str(price_str):
 # ── Async Shopify Scraper ─────────────────────────────────────────────────────
 
 async def fetch_suggest(session, sem, domain, sku, dealer_cost):
-    """Fetch suggest API + product.json for a single SKU. Returns (sku, match_or_None)."""
+    """Fetch suggest API + product.json for a single SKU.
+
+    Returns (sku, match_or_None, ok). ok=False means the REQUEST failed
+    (HTTP error, timeout, block) — the SKU was not actually checked and must
+    not be recorded in progress, or a blocking domain poisons the whole sweep
+    as "checked, no match".
+    """
     base_url = f"https://{domain}"
     suggest_url = f"{base_url}/search/suggest.json"
 
@@ -130,10 +136,10 @@ async def fetch_suggest(session, sem, domain, sku, dealer_cost):
                     await asyncio.sleep(random.uniform(5, 10))
                     async with session.get(suggest_url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp2:
                         if resp2.status != 200:
-                            return (sku, None)
+                            return (sku, None, False)
                         data = await resp2.json(content_type=None)
                 elif resp.status != 200:
-                    return (sku, None)
+                    return (sku, None, False)
                 else:
                     data = await resp.json(content_type=None)
 
@@ -162,17 +168,17 @@ async def fetch_suggest(session, sem, domain, sku, dealer_cost):
                                     "price": price,
                                     "url": f"{base_url}{url}",
                                     "title": title,
-                                })
+                                }, True)
                 except Exception:
                     continue
 
-            return (sku, None)
+            return (sku, None, True)
 
         except asyncio.TimeoutError:
-            return (sku, None)
+            return (sku, None, False)
         except Exception as e:
             log.debug(f"[{domain}] Error for {sku}: {e}")
-            return (sku, None)
+            return (sku, None, False)
 
 
 async def scrape_shopify_async(domain, skus_with_products, progress_key, progress,
@@ -190,8 +196,9 @@ async def scrape_shopify_async(domain, skus_with_products, progress_key, progres
         return False
 
     log.info(f"[{domain}] Async scraper: {len(work)} SKUs, concurrency={CONCURRENCY}")
-    results = {}
     sem = asyncio.Semaphore(CONCURRENCY)
+    errors = 0
+    attempted = 0
 
     connector = aiohttp.TCPConnector(limit=CONCURRENCY, limit_per_host=CONCURRENCY)
     async with aiohttp.ClientSession(headers=HEADERS, connector=connector) as session:
@@ -209,12 +216,23 @@ async def scrape_shopify_async(domain, skus_with_products, progress_key, progres
 
             batch_results = await asyncio.gather(*tasks)
 
-            for sku, match in batch_results:
-                if match:
-                    results[sku] = match
-                    progress.setdefault(progress_key, {})[sku] = match
-                else:
-                    progress.setdefault(progress_key, {})[sku] = None
+            for sku, match, ok in batch_results:
+                attempted += 1
+                if not ok:
+                    # Request failed (block/timeout) — leave the SKU
+                    # unrecorded so a later run actually checks it.
+                    errors += 1
+                    continue
+                progress.setdefault(progress_key, {})[sku] = match
+
+            # Circuit breaker: a domain that rejects (almost) everything is
+            # blocking this runner — burning the time budget on it poisons
+            # nothing now, but wastes the whole run. Move on.
+            if attempted >= 300 and errors / attempted > 0.90:
+                log.warning(f"[{domain}] {errors}/{attempted} requests failed — "
+                            f"domain appears to be blocking, skipping this run")
+                save_progress(progress)
+                return False
 
             # Checkpoint
             save_progress(progress)
@@ -223,7 +241,8 @@ async def scrape_shopify_async(domain, skus_with_products, progress_key, progres
             total_checked = len(progress.get(progress_key, {}))
             log.info(f"[{domain}] {done}/{len(work)} done | "
                      f"total checked: {total_checked} | matched: {matched} "
-                     f"({100 * matched // max(total_checked, 1)}%)")
+                     f"({100 * matched // max(total_checked, 1)}%) | "
+                     f"request errors this run: {errors}")
 
             # Small pause between batches to be polite
             await asyncio.sleep(random.uniform(1.0, 2.0))
@@ -343,15 +362,23 @@ def main():
 
     # A full sweep takes longer than one budgeted CI run, so progress
     # accumulates across runs (the progress file ships in the data bundle).
-    # Once every domain has covered every SKU, the sweep is done — clear it
-    # so the next cycle re-scrapes fresh prices instead of standing still.
+    # Once every domain has covered every SKU — or the cycle is older than
+    # MAX_CYCLE_DAYS (a perpetually-blocked domain would otherwise pin the
+    # cycle open forever) — clear it so the next cycle re-scrapes fresh
+    # prices instead of standing still.
+    MAX_CYCLE_DAYS = 21
     if not args.rebuild and not args.fresh and not args.limit and progress:
         sweep_complete = all(
             len(progress.get(c["domain"], {})) >= len(skus_with_products)
             for c in competitors)
-        if sweep_complete:
-            log.info("Previous sweep complete — starting a fresh cycle")
+        started_at = progress.get("_started_at")
+        cycle_expired = bool(started_at) and (time.time() - started_at) > MAX_CYCLE_DAYS * 86400
+        if sweep_complete or cycle_expired:
+            log.info("Previous sweep %s — starting a fresh cycle"
+                     % ("complete" if sweep_complete else "expired"))
             progress = {}
+    if not args.rebuild:
+        progress.setdefault("_started_at", time.time())
 
     if not args.rebuild:
         start = time.time()
@@ -394,6 +421,21 @@ def main():
         "total_skus_with_data": len(output_prices),
         "prices": output_prices,
     }
+
+    # Never replace a healthy output file with a drastically smaller one — a
+    # blocked/failed run must not destroy months of competitor data (this
+    # happened: run 27394350688 matched 0 SKUs and shipped an empty file).
+    # Mid-cycle partial sweeps legitimately shrink somewhat; 50% is the line.
+    if not args.dry_run and OUTPUT_FILE.exists():
+        try:
+            existing = json.loads(OUTPUT_FILE.read_text()).get("prices", {})
+        except Exception:
+            existing = {}
+        if len(existing) > 100 and len(output_prices) < 0.5 * len(existing):
+            log.error(f"REFUSING to overwrite {OUTPUT_FILE.name}: new data has "
+                      f"{len(output_prices)} SKUs vs existing {len(existing)} — "
+                      f"keeping the existing file")
+            return
 
     if not args.dry_run:
         OUTPUT_FILE.write_text(json.dumps(output, indent=2))
