@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -382,8 +383,91 @@ def step_images(run_dir, manifest, progress, dry_run=False):
     save_progress(run_dir, progress)
 
 
+def resolve_price(row, flagged):
+    """MAP -> MSRP -> tiered markup. Returns (price, source) or (None, reason)."""
+    sku = str(row["sku"]).strip()
+    if sku in flagged:
+        return None, "flagged: MAP <= dealer cost — manual pricing required"
+    if row.get("map_price"):
+        return float(row["map_price"]), "MAP"
+    if row.get("msrp"):
+        return float(row["msrp"]), "MSRP"
+    return calculate_markup_price(float(row["dealer_cost"])), "tiered markup"
+
+
+def build_image_payloads(run_dir, sku):
+    sku_dir = run_dir / "images" / sku
+    payloads = []
+    if sku_dir.is_dir():
+        for p in sorted(sku_dir.iterdir()):
+            if p.suffix.lower() in (".jpg", ".png", ".webp", ".gif"):
+                payloads.append({
+                    "attachment": base64.b64encode(p.read_bytes()).decode(),
+                    "filename": f"{slugify(sku)}-{p.name}",
+                })
+    return payloads
+
+
 def step_create(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Create DRAFT products for the `new` bucket. MUTATES THE STORE unless --dry-run."""
+    rows = {str(r["sku"]).strip(): r for r in manifest["rows"]}
+    flagged = set(progress.get("flagged_pricing", []))
+    content_dir = run_dir / "content"
+    created = progress.get("created", {})
+
+    for sku in progress["buckets"]["new"]:
+        if sku in created:
+            continue
+        row = rows[sku]
+        c = json.loads((content_dir / f"{sku}.json").read_text())
+        price, source = resolve_price(row, flagged)
+        if price is None:
+            log.warning(f"  SKIP {sku}: {source}")
+            continue
+
+        product = {
+            "title": c["title"],
+            "body_html": c["body_html"],
+            "vendor": manifest["vendor"],
+            "status": "draft",
+            "tags": ", ".join(generate_tags({
+                "clean_name": c["title"], "brand": manifest["vendor"], "model": ""})),
+            "metafields_global_title_tag": c.get("meta_title", c["title"]),
+            "metafields_global_description_tag": c.get("meta_description", ""),
+            "variants": [{
+                "sku": sku,
+                "price": f"{price:.2f}",
+                "cost": f"{float(row['dealer_cost']):.2f}",
+                "inventory_management": None,
+                "inventory_policy": "continue",
+                "taxable": True,
+            }],
+            "images": build_image_payloads(run_dir, sku),
+        }
+
+        if dry_run:
+            log.info(f"  DRY {sku}: would create draft '{c['title']}' "
+                     f"@ ${price:.2f} ({source}), cost ${row['dealer_cost']:.2f}, "
+                     f"{len(product['images'])} image(s)")
+            continue
+
+        data, code = shopify_post("products.json", {"product": product})
+        if data and "product" in data:
+            pid = data["product"]["id"]
+            created[sku] = str(pid)
+            progress["created"] = created
+            save_progress(run_dir, progress)
+            log.info(f"  CREATED {sku} -> product {pid} @ ${price:.2f} ({source})")
+        else:
+            progress["failed"][sku] = f"create failed: HTTP {code}: {json.dumps(data)[:300]}"
+            save_progress(run_dir, progress)
+            log.error(f"  FAILED {sku}: HTTP {code}")
+        time.sleep(0.55)
+
+    if not dry_run and "create" not in progress["steps_done"]:
+        progress["steps_done"].append("create")
+        save_progress(run_dir, progress)
+    log.info(f"create: {len(created)} created total, {len(progress['failed'])} failed")
 
 
 def step_update(run_dir, manifest, progress, dry_run=False):
