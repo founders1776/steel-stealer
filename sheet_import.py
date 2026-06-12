@@ -419,7 +419,13 @@ def step_create(run_dir, manifest, progress, dry_run=False):
         if sku in created:
             continue
         row = rows[sku]
-        c = json.loads((content_dir / f"{sku}.json").read_text())
+        content_file = content_dir / f"{sku}.json"
+        if not content_file.exists():
+            progress["failed"][sku] = "create skipped: no content file (re-run research)"
+            save_progress(run_dir, progress)
+            log.error(f"  FAILED {sku}: no content file — re-run research")
+            continue
+        c = json.loads(content_file.read_text())
         price, source = resolve_price(row, flagged)
         if price is None:
             log.warning(f"  SKIP {sku}: {source}")
@@ -455,6 +461,7 @@ def step_create(run_dir, manifest, progress, dry_run=False):
         if data and "product" in data:
             pid = data["product"]["id"]
             created[sku] = str(pid)
+            progress["failed"].pop(sku, None)
             progress["created"] = created
             save_progress(run_dir, progress)
             log.info(f"  CREATED {sku} -> product {pid} @ ${price:.2f} ({source})")
