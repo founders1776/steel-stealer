@@ -266,8 +266,55 @@ def step_match(run_dir, manifest, progress, dry_run=False):
              f"{len(buckets['ambiguous'])} ambiguous (manual review)")
 
 
+META_TITLE_MAX = 70       # soft caps — warn, don't fail
+META_DESC_MAX = 170
+
 def step_research_validate(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Validate Claude-agent content files for every SKU that needs one. Read-only."""
+    content_dir = run_dir / "content"
+    need = list(progress["buckets"]["new"]) + progress.get("needs_enrichment", [])
+    missing, invalid, ok = [], [], []
+    for sku in need:
+        f = content_dir / f"{sku}.json"
+        if not f.exists():
+            missing.append(sku)
+            continue
+        try:
+            c = json.loads(f.read_text())
+        except json.JSONDecodeError as e:
+            invalid.append(f"{sku}: bad JSON ({e})")
+            continue
+        problems = []
+        if c.get("sku") != sku:
+            problems.append("sku mismatch")
+        if not str(c.get("title", "")).strip():
+            problems.append("empty title")
+        body_text = strip_html(c.get("body_html", ""))
+        if len(body_text) < THIN_DESCRIPTION_CHARS:
+            problems.append(f"body too thin ({len(body_text)} chars)")
+        if sku not in c.get("body_html", ""):
+            problems.append("SKU not mentioned in body")
+        if not isinstance(c.get("image_urls"), list):
+            problems.append("image_urls not a list")
+        if len(c.get("meta_title", "")) > META_TITLE_MAX:
+            log.warning(f"  {sku}: meta_title {len(c['meta_title'])} chars (>{META_TITLE_MAX})")
+        if len(c.get("meta_description", "")) > META_DESC_MAX:
+            log.warning(f"  {sku}: meta_description {len(c['meta_description'])} chars (>{META_DESC_MAX})")
+        if problems:
+            invalid.append(f"{sku}: " + "; ".join(problems))
+        else:
+            ok.append(sku)
+
+    for line in invalid:
+        log.error(f"  INVALID {line}")
+    log.info(f"research: {len(ok)} ok, {len(missing)} missing, {len(invalid)} invalid "
+             f"of {len(need)} needed")
+    if missing:
+        log.info("missing: " + ", ".join(missing[:20]) + ("..." if len(missing) > 20 else ""))
+    if not missing and not invalid:
+        if "research" not in progress["steps_done"]:
+            progress["steps_done"].append("research")
+        save_progress(run_dir, progress)
 
 
 def step_images(run_dir, manifest, progress, dry_run=False):
