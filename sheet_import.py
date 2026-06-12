@@ -41,7 +41,6 @@ from import_missing_products import (
     shopify_headers,
     shopify_post,
     slugify,
-    parse_price,
     calculate_markup_price,
     generate_tags,
     SHOPIFY_STORE,
@@ -411,6 +410,9 @@ def build_image_payloads(run_dir, sku):
 
 def step_create(run_dir, manifest, progress, dry_run=False):
     """Create DRAFT products for the `new` bucket. MUTATES THE STORE unless --dry-run."""
+    if "parse" not in progress["steps_done"]:
+        log.error("run --step parse first — flagged-pricing data missing")
+        sys.exit(1)
     rows = {str(r["sku"]).strip(): r for r in manifest["rows"]}
     flagged = set(progress.get("flagged_pricing", []))
     content_dir = run_dir / "content"
@@ -480,6 +482,9 @@ def step_create(run_dir, manifest, progress, dry_run=False):
 
 def step_update(run_dir, manifest, progress, dry_run=False):
     """Smart-update existing cards. MUTATES THE STORE unless --dry-run."""
+    if "parse" not in progress["steps_done"]:
+        log.error("run --step parse first — flagged-pricing data missing")
+        sys.exit(1)
     rows = {str(r["sku"]).strip(): r for r in manifest["rows"]}
     flagged = set(progress.get("flagged_pricing", []))
     content_dir = run_dir / "content"
@@ -487,87 +492,112 @@ def step_update(run_dir, manifest, progress, dry_run=False):
     needs_enrichment = set(progress.get("needs_enrichment", []))
 
     for sku, ids in progress["buckets"]["existing"].items():
-        if sku in updated:
+        if sku in updated and sku not in needs_enrichment:
             continue
-        row = rows[sku]
-        changes = []
+        try:
+            row = rows[sku]
+            changes = []
 
-        # Live product state — never decide off local data
-        resp = shopify_get(f"products/{ids['product_id']}.json")
-        if resp is None:
-            progress["failed"][sku] = "update skipped: product GET failed after retries"
-            save_progress(run_dir, progress)
-            log.error(f"  FAILED {sku}: product GET failed after retries — continuing")
-            continue
-        live = resp.json()["product"]
-        time.sleep(0.3)
+            # Live product state — never decide off local data
+            resp = shopify_get(f"products/{ids['product_id']}.json")
+            if resp is None:
+                progress["failed"][sku] = "update skipped: product GET failed after retries"
+                save_progress(run_dir, progress)
+                log.error(f"  FAILED {sku}: product GET failed after retries — continuing")
+                continue
+            live = resp.json()["product"]
+            time.sleep(0.3)
 
-        # 1) SKU spelling fix (sheet is authoritative)
-        fix = progress["buckets"]["sku_fixes"].get(sku)
-        if fix:
-            if dry_run:
-                log.info(f"  DRY {sku}: would fix store SKU {fix['store_sku']!r} -> {sku!r}")
-            else:
-                shopify_put(f"variants/{ids['variant_id']}.json",
-                            {"variant": {"id": int(ids["variant_id"]), "sku": sku}})
-                time.sleep(0.55)
-            changes.append(f"sku fixed from {fix['store_sku']}")
-
-        # 2) Cost + price (always). Flagged-pricing SKUs get cost only.
-        price, source = resolve_price(row, flagged)
-        variant_payload = {"id": int(ids["variant_id"]),
-                           "cost": f"{float(row['dealer_cost']):.2f}"}
-        if price is not None:
-            variant_payload["price"] = f"{price:.2f}"
-            changes.append(f"price ${price:.2f} ({source}), cost ${row['dealer_cost']:.2f}")
-        else:
-            changes.append(f"cost ${row['dealer_cost']:.2f} only ({source})")
-        if dry_run:
-            log.info(f"  DRY {sku}: {changes[-1]}")
-        else:
-            shopify_put(f"variants/{ids['variant_id']}.json", {"variant": variant_payload})
-            time.sleep(0.55)
-
-        # 3) Enrichment: images if sparse, description if thin
-        content_file = content_dir / f"{sku}.json"
-        wants_images = len(live.get("images", [])) < ENRICH_IMAGE_THRESHOLD
-        wants_desc = len(strip_html(live.get("body_html", ""))) < THIN_DESCRIPTION_CHARS
-        if (wants_images or wants_desc) and not content_file.exists():
-            needs_enrichment.add(sku)
-            log.info(f"  {sku}: needs enrichment ({'images' if wants_images else ''}"
-                     f"{'+' if wants_images and wants_desc else ''}"
-                     f"{'description' if wants_desc else ''}) — research it, then re-run update")
-        elif content_file.exists():
-            c = json.loads(content_file.read_text())
-            if wants_desc:
+            # 1) SKU spelling fix (sheet is authoritative)
+            fix = progress["buckets"]["sku_fixes"].get(sku)
+            if fix:
                 if dry_run:
-                    log.info(f"  DRY {sku}: would replace thin description")
+                    log.info(f"  DRY {sku}: would fix store SKU {fix['store_sku']!r} -> {sku!r}")
+                    changes.append(f"sku fixed from {fix['store_sku']}")
                 else:
-                    shopify_put(f"products/{ids['product_id']}.json", {"product": {
-                        "id": int(ids["product_id"]),
-                        "body_html": c["body_html"],
-                        "metafields_global_title_tag": c.get("meta_title", ""),
-                        "metafields_global_description_tag": c.get("meta_description", ""),
-                    }})
+                    data, code = shopify_put(f"variants/{ids['variant_id']}.json",
+                                {"variant": {"id": int(ids["variant_id"]), "sku": sku}})
+                    if code != 200:
+                        log.warning(f"  {sku}: SKU-fix PUT returned HTTP {code} — skipping sku fix record")
+                    else:
+                        changes.append(f"sku fixed from {fix['store_sku']}")
                     time.sleep(0.55)
-                changes.append("description rewritten")
-            if wants_images:
-                imgs = build_image_payloads(run_dir, sku)
-                for img in imgs:
-                    if dry_run:
-                        continue
-                    shopify_post(f"products/{ids['product_id']}/images.json", {"image": img})
-                    time.sleep(0.55)
-                if imgs:
-                    changes.append(f"{len(imgs)} image(s) added"
-                                   + (" [dry]" if dry_run else ""))
-            needs_enrichment.discard(sku)
 
-        if not dry_run:
-            updated[sku] = changes
-            progress["updated"] = updated
-        progress["needs_enrichment"] = sorted(needs_enrichment)
-        save_progress(run_dir, progress)
+            # 2) Cost + price (always). Flagged-pricing SKUs get cost only.
+            price, source = resolve_price(row, flagged)
+            variant_payload = {"id": int(ids["variant_id"]),
+                               "cost": f"{float(row['dealer_cost']):.2f}"}
+            if price is not None:
+                variant_payload["price"] = f"{price:.2f}"
+                changes.append(f"price ${price:.2f} ({source}), cost ${row['dealer_cost']:.2f}")
+            else:
+                changes.append(f"cost ${row['dealer_cost']:.2f} only ({source})")
+            if dry_run:
+                log.info(f"  DRY {sku}: {changes[-1]}")
+            else:
+                data, code = shopify_put(f"variants/{ids['variant_id']}.json",
+                                         {"variant": variant_payload})
+                if code != 200:
+                    raise RuntimeError(f"variant PUT HTTP {code}")
+                time.sleep(0.55)
+
+            # 3) Enrichment: images if sparse, description if thin
+            content_file = content_dir / f"{sku}.json"
+            wants_images = len(live.get("images", [])) < ENRICH_IMAGE_THRESHOLD
+            wants_desc = len(strip_html(live.get("body_html", ""))) < THIN_DESCRIPTION_CHARS
+            if (wants_images or wants_desc) and not content_file.exists():
+                needs_enrichment.add(sku)
+                log.info(f"  {sku}: needs enrichment ({'images' if wants_images else ''}"
+                         f"{'+' if wants_images and wants_desc else ''}"
+                         f"{'description' if wants_desc else ''}) — research it, then re-run update")
+            elif content_file.exists():
+                c = json.loads(content_file.read_text())
+                if wants_desc:
+                    if dry_run:
+                        log.info(f"  DRY {sku}: would replace thin description")
+                    else:
+                        data, code = shopify_put(f"products/{ids['product_id']}.json",
+                                                 {"product": {
+                            "id": int(ids["product_id"]),
+                            "body_html": c["body_html"],
+                            "metafields_global_title_tag": c.get("meta_title", ""),
+                            "metafields_global_description_tag": c.get("meta_description", ""),
+                        }})
+                        if code != 200:
+                            raise RuntimeError(f"description PUT HTTP {code}")
+                        time.sleep(0.55)
+                    changes.append("description rewritten")
+                if wants_images:
+                    imgs = build_image_payloads(run_dir, sku)
+                    uploaded = 0
+                    for img in imgs:
+                        if dry_run:
+                            continue
+                        idata, icode = shopify_post(
+                            f"products/{ids['product_id']}/images.json", {"image": img})
+                        if icode not in (200, 201):
+                            log.warning(f"  {sku}: image POST returned HTTP {icode} — skipping")
+                        else:
+                            uploaded += 1
+                        time.sleep(0.55)
+                    if imgs:
+                        count = len(imgs) if dry_run else uploaded
+                        changes.append(f"{count} image(s) added"
+                                       + (" [dry]" if dry_run else ""))
+                if not dry_run:
+                    needs_enrichment.discard(sku)
+
+            if not dry_run:
+                updated[sku] = changes
+                progress["updated"] = updated
+                progress["failed"].pop(sku, None)
+            progress["needs_enrichment"] = sorted(needs_enrichment)
+            save_progress(run_dir, progress)
+        except Exception as e:
+            progress["failed"][sku] = f"update failed: {e}"
+            save_progress(run_dir, progress)
+            log.error(f"  FAILED {sku}: {e} — continuing")
+            continue
 
     if not dry_run and "update" not in progress["steps_done"]:
         progress["steps_done"].append("update")
@@ -622,9 +652,13 @@ def step_register(run_dir, manifest, progress, dry_run=False):
         for v in mp.get("uploaded", {}).values():
             if isinstance(v, dict) and v.get("status") == "created" and v.get("id"):
                 sync_pids.add(v["id"])
+    sync_pid_strs = {str(p) for p in sync_pids}
+    # For sku_fixes rows this records the SHEET spelling; the sync keys off the
+    # old spelling until the map rebuild rekeys it — protection actually comes
+    # from the rebuilt map, the list entry is belt-and-suspenders.
     ds_added = []
     for sku, ids in progress["buckets"]["existing"].items():
-        if str(ids["product_id"]) in {str(p) for p in sync_pids} and sku not in ds_skus:
+        if str(ids["product_id"]) in sync_pid_strs and sku not in ds_skus:
             ds_skus.append(sku)
             ds_added.append(sku)
 
@@ -682,16 +716,24 @@ def step_register(run_dir, manifest, progress, dry_run=False):
 
 def step_activate(run_dir, manifest, progress, dry_run=False):
     """Flip this run's created drafts to active (after James reviews)."""
+    had_failures = False
     for sku, pid in progress.get("created", {}).items():
         if dry_run:
             log.info(f"  DRY {sku}: would activate product {pid}")
             continue
-        shopify_put(f"products/{pid}.json",
+        data, code = shopify_put(f"products/{pid}.json",
                     {"product": {"id": int(pid), "status": "active"}})
+        if code != 200:
+            log.error(f"  FAILED activate {sku} (product {pid}): HTTP {code} — continuing")
+            had_failures = True
+            continue
         log.info(f"  ACTIVATED {sku} (product {pid})")
         time.sleep(0.55)
     if not dry_run:
-        progress["activated"] = True
+        if had_failures:
+            log.warning("some activations failed — re-run --activate to retry")
+        else:
+            progress["activated"] = True
         save_progress(run_dir, progress)
 
 
