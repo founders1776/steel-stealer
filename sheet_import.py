@@ -588,6 +588,9 @@ def step_register(run_dir, manifest, progress, dry_run=False):
     for sku in touched:
         if sku in locks:
             continue
+        if sku not in rows:
+            log.warning(f"  {sku}: in progress but not in manifest — no lock written")
+            continue
         price, source = resolve_price(rows[sku], flagged)
         locks[sku] = (f"${price:.2f} MAP ({manifest['brand']} sheet {manifest['parsed_at']})"
                       if source == "MAP" else
@@ -625,16 +628,6 @@ def step_register(run_dir, manifest, progress, dry_run=False):
             ds_skus.append(sku)
             ds_added.append(sku)
 
-    if dry_run:
-        log.info(f"DRY register: +{added_locks} price locks, brand_added={brand_added}, "
-                 f"+{len(ds_added)} dual-source SKUs")
-    else:
-        PRICE_LOCKS_FILE.write_text(json.dumps(locks, indent=2))
-        DUAL_SOURCE_BRANDS_FILE.write_text(json.dumps(brands, indent=2))
-        DUAL_SOURCE_SKUS_FILE.write_text(json.dumps(ds_skus, indent=2))
-        log.info("rebuilding shopify_product_map.json ...")
-        subprocess.run([sys.executable, "build_shopify_map.py"], check=True, cwd=BASE_DIR)
-
     # 4) report.md
     images_root = run_dir / "images"
     need = list(progress["buckets"]["new"]) + progress.get("needs_enrichment", [])
@@ -669,6 +662,17 @@ def step_register(run_dir, manifest, progress, dry_run=False):
         f"the local file from that secret every run.",
     ]
     (run_dir / "report.md").write_text("\n".join(lines))
+
+    if dry_run:
+        log.info(f"DRY register: +{added_locks} price locks, brand_added={brand_added}, "
+                 f"+{len(ds_added)} dual-source SKUs")
+    else:
+        PRICE_LOCKS_FILE.write_text(json.dumps(locks, indent=2))
+        DUAL_SOURCE_BRANDS_FILE.write_text(json.dumps(brands, indent=2))
+        DUAL_SOURCE_SKUS_FILE.write_text(json.dumps(ds_skus, indent=2))
+        log.info("rebuilding shopify_product_map.json ...")
+        subprocess.run([sys.executable, "build_shopify_map.py"], check=True, cwd=BASE_DIR)
+
     if not dry_run and "register" not in progress["steps_done"]:
         progress["steps_done"].append("register")
     save_progress(run_dir, progress)
