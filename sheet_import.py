@@ -317,8 +317,69 @@ def step_research_validate(run_dir, manifest, progress, dry_run=False):
         save_progress(run_dir, progress)
 
 
+IMG_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
+
 def step_images(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Download image_urls from content files into images/<sku>/NN.<ext>."""
+    from PIL import Image  # lazy: PIL only needed here
+
+    content_dir = run_dir / "content"
+    images_root = run_dir / "images"
+    need = list(progress["buckets"]["new"]) + progress.get("needs_enrichment", [])
+    done = set(progress.get("images_done", []))
+
+    for sku in need:
+        if sku in done:
+            continue
+        f = content_dir / f"{sku}.json"
+        if not f.exists():
+            continue
+        urls = json.loads(f.read_text()).get("image_urls", [])[:MAX_IMAGES_PER_PRODUCT * 2]
+        sku_dir = images_root / sku
+        sku_dir.mkdir(parents=True, exist_ok=True)
+        seen_hashes, saved = set(), 0
+        for url in urls:
+            if saved >= MAX_IMAGES_PER_PRODUCT:
+                break
+            try:
+                resp = requests.get(url, headers=IMG_HEADERS, timeout=30)
+                resp.raise_for_status()
+                data = resp.content
+            except Exception as e:
+                log.warning(f"  {sku}: download failed {url} ({e})")
+                continue
+            digest = hashlib.sha256(data).hexdigest()
+            if digest in seen_hashes:
+                continue
+            tmp = sku_dir / "_tmp"
+            tmp.write_bytes(data)
+            try:
+                with Image.open(tmp) as im:
+                    w, h = im.size
+                    fmt = (im.format or "").lower()
+                if min(w, h) < MIN_IMAGE_PX or fmt not in ("jpeg", "png", "webp", "gif"):
+                    tmp.unlink()
+                    continue
+            except Exception:
+                tmp.unlink()
+                continue
+            ext = {"jpeg": "jpg"}.get(fmt, fmt)
+            tmp.rename(sku_dir / f"{saved:02d}.{ext}")
+            seen_hashes.add(digest)
+            saved += 1
+            time.sleep(0.2)
+        log.info(f"  {sku}: {saved} image(s)")
+        done.add(sku)
+        progress["images_done"] = sorted(done)
+        save_progress(run_dir, progress)
+
+    no_image = [s for s in need
+                if not (images_root / s).is_dir() or not any((images_root / s).iterdir())]
+    log.info(f"images: {len(done)} SKUs processed, {len(no_image)} without any image")
+    if "images" not in progress["steps_done"]:
+        progress["steps_done"].append("images")
+    save_progress(run_dir, progress)
 
 
 def step_create(run_dir, manifest, progress, dry_run=False):
