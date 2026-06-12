@@ -202,7 +202,8 @@ def graphql_find_sku(sku):
             if attempt == 2:
                 raise
             time.sleep((attempt + 1) * 5)
-    return []
+    raise RuntimeError(f"graphql_find_sku({sku!r}): retries exhausted — refusing to "
+                       "classify as new (duplicate-product risk)")
 
 
 def step_match(run_dir, manifest, progress, dry_run=False):
