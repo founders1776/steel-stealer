@@ -173,8 +173,96 @@ def step_parse_validate(run_dir, manifest, progress, dry_run=False):
              f"{len(flagged)} flagged (MAP <= cost)")
 
 
+def graphql_find_sku(sku):
+    """Return list of {variant_id, product_id, sku} for an exact live-store SKU match."""
+    escaped = sku.replace('"', '\\"')
+    query = '''{ productVariants(first: 5, query: "sku:%s") {
+        edges { node { id sku product { id } } } } }''' % escaped
+    url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
+               "Content-Type": "application/json"}
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json={"query": query}, headers=headers, timeout=30)
+            if resp.status_code == 429:
+                time.sleep(float(resp.headers.get("Retry-After", 2)))
+                continue
+            resp.raise_for_status()
+            out = []
+            for edge in resp.json().get("data", {}).get("productVariants", {}).get("edges", []):
+                node = edge.get("node", {})
+                if node.get("sku", "").strip() == sku.strip():
+                    out.append({
+                        "variant_id": node["id"].split("/")[-1],
+                        "product_id": node["product"]["id"].split("/")[-1],
+                        "sku": node["sku"],
+                    })
+            return out
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep((attempt + 1) * 5)
+    return []
+
+
 def step_match(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Bucket manifest rows: new / existing / sku_fixes / ambiguous. Read-only."""
+    if not SHOPIFY_MAP_FILE.exists():
+        log.error("shopify_product_map.json missing — run build_shopify_map.py first")
+        sys.exit(1)
+    shopify_map = json.loads(SHOPIFY_MAP_FILE.read_text())
+    vendor = manifest["vendor"].strip().lower()
+
+    # Index live-store SKUs (exact and O0-normalized) for this vendor + global exact
+    exact = {}           # sku -> map entry
+    fuzzy = {}           # normalized sku -> [(store_sku, entry)] — same vendor only
+    for store_sku, entry in shopify_map.items():
+        exact[store_sku] = entry
+        if entry.get("vendor", "").strip().lower() == vendor:
+            fuzzy.setdefault(normalize_o0(store_sku), []).append((store_sku, entry))
+
+    buckets = {"new": [], "existing": {}, "sku_fixes": {}, "ambiguous": {}}
+    for row in manifest["rows"]:
+        sku = str(row["sku"]).strip()
+        if sku in exact:
+            e = exact[sku]
+            buckets["existing"][sku] = {"product_id": e["product_id"],
+                                        "variant_id": e["variant_id"]}
+            continue
+        candidates = [(s, e) for s, e in fuzzy.get(normalize_o0(sku), []) if s != sku]
+        if len(candidates) == 1:
+            store_sku, e = candidates[0]
+            # Sheet SKU is authoritative: step 6 fixes the store SKU spelling.
+            buckets["sku_fixes"][sku] = {"store_sku": store_sku,
+                                         "product_id": e["product_id"],
+                                         "variant_id": e["variant_id"]}
+            buckets["existing"][sku] = {"product_id": e["product_id"],
+                                        "variant_id": e["variant_id"]}
+        elif len(candidates) > 1:
+            buckets["ambiguous"][sku] = [s for s, _ in candidates]
+        else:
+            buckets["new"].append(sku)
+
+    # Live double-check: nothing goes to `new` on local data alone.
+    confirmed_new = []
+    for sku in buckets["new"]:
+        live = graphql_find_sku(sku)
+        if live:
+            log.warning(f"  {sku}: in store but missing from local map — treating as existing")
+            buckets["existing"][sku] = {"product_id": live[0]["product_id"],
+                                        "variant_id": live[0]["variant_id"]}
+        else:
+            confirmed_new.append(sku)
+        time.sleep(0.3)
+    buckets["new"] = confirmed_new
+
+    progress["buckets"] = buckets
+    if "match" not in progress["steps_done"]:
+        progress["steps_done"].append("match")
+    save_progress(run_dir, progress)
+    log.info(f"match: {len(buckets['new'])} new, {len(buckets['existing'])} existing "
+             f"({len(buckets['sku_fixes'])} need SKU fix), "
+             f"{len(buckets['ambiguous'])} ambiguous (manual review)")
 
 
 def step_research_validate(run_dir, manifest, progress, dry_run=False):
