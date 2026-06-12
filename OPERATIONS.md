@@ -127,6 +127,8 @@ python3 sync_stock_prices.py --reprice-only             # apply
 
 The weekly scrape workflow (`scrape-competitor-prices.yml`, Sun 2am UTC) now decrypts/re-encrypts the data bundle like the sync does, so competitor data actually refreshes in CI. It needs the `COMPETITORS_JSON` and `REPRICE_BRANDS` secrets set once (contents of the local `competitors.json` / `reprice_brands.json`).
 
+**A full sweep spans ~2 weekly runs.** GitHub hard-kills jobs at 6h and the full sweep (8,743 SKUs × 12 domains) takes ~9h, so the scrape runs with `--budget-minutes 300` and checkpoints `competitor_price_progress.json` into the data bundle. Each run resumes where the last stopped; when a sweep completes, the next run starts a fresh cycle. Mid-cycle, `competitor_prices.json` covers only the domains scraped so far in that cycle — fresh beats complete-but-stale.
+
 ---
 
 ## 3. Pricing Tiers

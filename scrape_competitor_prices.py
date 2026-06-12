@@ -175,15 +175,19 @@ async def fetch_suggest(session, sem, domain, sku, dealer_cost):
             return (sku, None)
 
 
-async def scrape_shopify_async(domain, skus_with_products, progress_key, progress, limit=0):
-    """Scrape a Shopify competitor with async concurrent requests."""
+async def scrape_shopify_async(domain, skus_with_products, progress_key, progress,
+                               limit=0, deadline=None):
+    """Scrape a Shopify competitor with async concurrent requests.
+
+    Returns True if the time budget (deadline) was hit mid-domain.
+    """
     work = [(sku, prod) for sku, prod in skus_with_products if sku not in progress.get(progress_key, {})]
     if limit:
         work = work[:limit]
 
     if not work:
         log.info(f"[{domain}] No work remaining (all SKUs already checked)")
-        return {}
+        return False
 
     log.info(f"[{domain}] Async scraper: {len(work)} SKUs, concurrency={CONCURRENCY}")
     results = {}
@@ -193,6 +197,10 @@ async def scrape_shopify_async(domain, skus_with_products, progress_key, progres
     async with aiohttp.ClientSession(headers=HEADERS, connector=connector) as session:
         # Process in batches for checkpointing
         for batch_start in range(0, len(work), BATCH_SIZE):
+            if deadline and time.time() > deadline:
+                log.info(f"[{domain}] Time budget reached — progress saved, "
+                         f"next run resumes here")
+                return True
             batch = work[batch_start:batch_start + BATCH_SIZE]
             tasks = []
             for sku, product in batch:
@@ -220,7 +228,7 @@ async def scrape_shopify_async(domain, skus_with_products, progress_key, progres
             # Small pause between batches to be polite
             await asyncio.sleep(random.uniform(1.0, 2.0))
 
-    return results
+    return False
 
 
 # ── Progress ──────────────────────────────────────────────────────────────────
@@ -237,7 +245,7 @@ def save_progress(progress):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-async def run_scrape(competitors, skus_with_products, progress, limit=0):
+async def run_scrape(competitors, skus_with_products, progress, limit=0, deadline=None):
     """Run the async scraper for all competitors."""
     for comp in competitors:
         domain = comp["domain"]
@@ -252,9 +260,13 @@ async def run_scrape(competitors, skus_with_products, progress, limit=0):
         log.info(f"Scraping: {domain}")
         log.info(f"{'=' * 60}")
 
-        await scrape_shopify_async(domain, skus_with_products, progress_key, progress, limit)
+        budget_hit = await scrape_shopify_async(
+            domain, skus_with_products, progress_key, progress, limit, deadline)
 
         save_progress(progress)
+        if budget_hit:
+            log.info("Stopping sweep for this run — remaining domains resume next run")
+            break
         matched = sum(1 for v in progress.get(progress_key, {}).values() if v)
         total = len(progress.get(progress_key, {}))
         log.info(f"[{domain}] Complete: {total} checked, {matched} matched "
@@ -270,6 +282,9 @@ def main():
                         help="Skip scraping, just rebuild competitor_prices.json from progress data")
     parser.add_argument("--fresh", action="store_true",
                         help="Clear progress and start fresh (re-scrape everything)")
+    parser.add_argument("--budget-minutes", type=int, default=0,
+                        help="Stop scraping after N minutes (progress saved; next run "
+                             "resumes). For CI, where jobs are hard-killed at 6h.")
     args = parser.parse_args()
 
     if aiohttp is None:
@@ -326,9 +341,23 @@ def main():
 
     log.info(f"Competitors to scrape: {len(competitors)}")
 
+    # A full sweep takes longer than one budgeted CI run, so progress
+    # accumulates across runs (the progress file ships in the data bundle).
+    # Once every domain has covered every SKU, the sweep is done — clear it
+    # so the next cycle re-scrapes fresh prices instead of standing still.
+    if not args.rebuild and not args.fresh and not args.limit and progress:
+        sweep_complete = all(
+            len(progress.get(c["domain"], {})) >= len(skus_with_products)
+            for c in competitors)
+        if sweep_complete:
+            log.info("Previous sweep complete — starting a fresh cycle")
+            progress = {}
+
     if not args.rebuild:
         start = time.time()
-        asyncio.run(run_scrape(competitors, skus_with_products, progress, args.limit))
+        deadline = start + args.budget_minutes * 60 if args.budget_minutes else None
+        asyncio.run(run_scrape(competitors, skus_with_products, progress, args.limit,
+                               deadline=deadline))
         elapsed = time.time() - start
         log.info(f"\nScraping completed in {elapsed / 60:.1f} minutes")
 

@@ -11,7 +11,10 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 480  # 8 hours
+    # GitHub hard-kills jobs at 6h (360m) regardless of this setting — the
+    # scrape gets a 300m budget and saves progress, so a full sweep (~9h)
+    # completes across consecutive weekly runs.
+    timeout-minutes: 350
 
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +79,7 @@ jobs:
       - name: Scrape competitor prices (async)
         run: |
           if python -c "import json,sys; d=json.load(open('competitors.json')); sys.exit(0 if d.get('competitors') else 1)" 2>/dev/null; then
-            python scrape_competitor_prices.py
+            python scrape_competitor_prices.py --budget-minutes 300
           else
             echo "No competitors.json with domains — skipping scrape"
           fi
@@ -100,7 +103,7 @@ jobs:
                    competitor_prices.json bulk_import_progress.json \
                    missing_import_progress.json dual_source_skus.json \
                    dual_source_brands.json competitors.json reprice_brands.json \
-                   reprice_targets.json; do
+                   reprice_targets.json competitor_price_progress.json; do
             [ -f "$f" ] && FILES="$FILES $f"
           done
           tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz $FILES
