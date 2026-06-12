@@ -34,7 +34,9 @@ from pathlib import Path
 import requests
 
 from import_missing_products import (
+    shopify_api_url,
     shopify_get,
+    shopify_headers,
     shopify_post,
     slugify,
     parse_price,
@@ -64,9 +66,8 @@ log = logging.getLogger(__name__)
 
 def shopify_put(path, payload, retries=3):
     """PUT helper mirroring shopify_post (import_missing_products has no PUT)."""
-    url = f"https://{SHOPIFY_STORE}/admin/api/{SHOPIFY_API_VERSION}/{path}"
-    headers = {"X-Shopify-Access-Token": SHOPIFY_ACCESS_TOKEN,
-               "Content-Type": "application/json"}
+    url = shopify_api_url(path)
+    headers = shopify_headers()
     for attempt in range(retries):
         try:
             resp = requests.put(url, json=payload, headers=headers, timeout=60)
