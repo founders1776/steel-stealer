@@ -28,6 +28,7 @@ import html
 import json
 import logging
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -576,11 +577,118 @@ def step_update(run_dir, manifest, progress, dry_run=False):
 
 
 def step_register(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Registry updates + report.md. Mutates LOCAL json files, not the store."""
+    rows = {str(r["sku"]).strip(): r for r in manifest["rows"]}
+    flagged = set(progress.get("flagged_pricing", []))
+    touched = list(progress.get("created", {})) + list(progress.get("updated", {}))
+
+    # 1) price_locks.json — every imported SKU @ MAP (or note when markup-priced)
+    locks = json.loads(PRICE_LOCKS_FILE.read_text()) if PRICE_LOCKS_FILE.exists() else {}
+    added_locks = 0
+    for sku in touched:
+        if sku in locks:
+            continue
+        price, source = resolve_price(rows[sku], flagged)
+        locks[sku] = (f"${price:.2f} MAP ({manifest['brand']} sheet {manifest['parsed_at']})"
+                      if source == "MAP" else
+                      f"{source} (sheet import {manifest['parsed_at']}) — treat as MAP-protected")
+        added_locks += 1
+
+    # 2) dual_source_brands.json — new brand?
+    brands = json.loads(DUAL_SOURCE_BRANDS_FILE.read_text()) if DUAL_SOURCE_BRANDS_FILE.exists() else []
+    brand_added = False
+    if manifest["brand"].upper() not in {b.upper() for b in brands}:
+        brands.append(manifest["brand"].upper())
+        brand_added = True
+
+    # 3) dual_source_skus.json — matched cards the Steel City sync currently
+    #    tracks. The sync's gate is a PRODUCT-ID set built from
+    #    bulk_import_progress.json + missing_import_progress.json (see
+    #    sync_stock_prices.py:763-781), keyed by handle with {id, status}.
+    #    Any existing-bucket card whose product_id is in that set gets its
+    #    (sheet) SKU added to dual_source_skus.json so the sync stops
+    #    stock-drafting it — it's now available direct from the distributor.
+    ds_skus = json.loads(DUAL_SOURCE_SKUS_FILE.read_text()) if DUAL_SOURCE_SKUS_FILE.exists() else []
+    sync_pids = set()
+    if BULK_IMPORT_FILE.exists():
+        bulk = json.loads(BULK_IMPORT_FILE.read_text())
+        sync_pids = {v["id"] for v in bulk.values()
+                     if isinstance(v, dict) and v.get("status") == "created"}
+    if MISSING_IMPORT_FILE.exists():
+        mp = json.loads(MISSING_IMPORT_FILE.read_text())
+        for v in mp.get("uploaded", {}).values():
+            if isinstance(v, dict) and v.get("status") == "created" and v.get("id"):
+                sync_pids.add(v["id"])
+    ds_added = []
+    for sku, ids in progress["buckets"]["existing"].items():
+        if str(ids["product_id"]) in {str(p) for p in sync_pids} and sku not in ds_skus:
+            ds_skus.append(sku)
+            ds_added.append(sku)
+
+    if dry_run:
+        log.info(f"DRY register: +{added_locks} price locks, brand_added={brand_added}, "
+                 f"+{len(ds_added)} dual-source SKUs")
+    else:
+        PRICE_LOCKS_FILE.write_text(json.dumps(locks, indent=2))
+        DUAL_SOURCE_BRANDS_FILE.write_text(json.dumps(brands, indent=2))
+        DUAL_SOURCE_SKUS_FILE.write_text(json.dumps(ds_skus, indent=2))
+        log.info("rebuilding shopify_product_map.json ...")
+        subprocess.run([sys.executable, "build_shopify_map.py"], check=True, cwd=BASE_DIR)
+
+    # 4) report.md
+    images_root = run_dir / "images"
+    need = list(progress["buckets"]["new"]) + progress.get("needs_enrichment", [])
+    no_image = [s for s in need
+                if not (images_root / s).is_dir() or not any((images_root / s).iterdir())]
+    lines = [
+        f"# Sheet import report — {manifest['brand']} ({manifest['parsed_at']})",
+        f"Source: `{manifest['source_sheet']}`", "",
+        f"## Created ({len(progress.get('created', {}))} drafts)",
+        *(f"- {s} -> product {pid}" for s, pid in sorted(progress.get("created", {}).items())),
+        "", f"## Updated in place ({len(progress.get('updated', {}))})",
+        *(f"- {s}: {'; '.join(ch)}" for s, ch in sorted(progress.get("updated", {}).items())),
+        "", f"## SKU spelling fixes ({len(progress['buckets']['sku_fixes'])})",
+        *(f"- store {v['store_sku']!r} -> sheet {k!r}"
+          for k, v in sorted(progress["buckets"]["sku_fixes"].items())),
+        "", f"## Ambiguous matches — MANUAL REVIEW ({len(progress['buckets']['ambiguous'])})",
+        *(f"- {k}: candidates {v}" for k, v in sorted(progress["buckets"]["ambiguous"].items())),
+        "", f"## Flagged pricing (MAP <= cost) — MANUAL PRICING ({len(flagged)})",
+        *(f"- {s}" for s in sorted(flagged)),
+        "", f"## No image found ({len(no_image)})",
+        *(f"- {s}" for s in sorted(no_image)),
+        "", f"## Failed ({len(progress.get('failed', {}))})",
+        *(f"- {s}: {err}" for s, err in sorted(progress.get("failed", {}).items())),
+        "", f"## Skipped at parse ({len(manifest.get('skipped_rows', []))})",
+        *(f"- {r['raw']} — {r['reason']}" for r in manifest.get("skipped_rows", [])),
+        "",
+        "## Follow-ups",
+        f"- Registry files changed: re-encrypt the CI data bundle and commit "
+        f"(see OPERATIONS.md / workflow tar list) or the next CI run resurrects stale copies.",
+        f"- If a NEW brand was added: update the `DUAL_SOURCE_BRANDS` GitHub secret "
+        f"(`gh secret set DUAL_SOURCE_BRANDS < dual_source_brands.json`) — CI overwrites "
+        f"the local file from that secret every run.",
+    ]
+    (run_dir / "report.md").write_text("\n".join(lines))
+    if not dry_run and "register" not in progress["steps_done"]:
+        progress["steps_done"].append("register")
+    save_progress(run_dir, progress)
+    log.info(f"register: +{added_locks} locks, brand_added={brand_added}, "
+             f"+{len(ds_added)} dual-source SKUs, report -> {run_dir / 'report.md'}")
 
 
 def step_activate(run_dir, manifest, progress, dry_run=False):
-    raise NotImplementedError
+    """Flip this run's created drafts to active (after James reviews)."""
+    for sku, pid in progress.get("created", {}).items():
+        if dry_run:
+            log.info(f"  DRY {sku}: would activate product {pid}")
+            continue
+        shopify_put(f"products/{pid}.json",
+                    {"product": {"id": int(pid), "status": "active"}})
+        log.info(f"  ACTIVATED {sku} (product {pid})")
+        time.sleep(0.55)
+    if not dry_run:
+        progress["activated"] = True
+        save_progress(run_dir, progress)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
