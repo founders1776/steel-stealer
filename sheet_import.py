@@ -51,6 +51,7 @@ from import_missing_products import (
 BASE_DIR = Path(__file__).parent
 SHOPIFY_MAP_FILE = BASE_DIR / "shopify_product_map.json"
 PRICE_LOCKS_FILE = BASE_DIR / "price_locks.json"
+REPRICE_BRANDS_FILE = BASE_DIR / "reprice_brands.json"
 DUAL_SOURCE_BRANDS_FILE = BASE_DIR / "dual_source_brands.json"
 DUAL_SOURCE_SKUS_FILE = BASE_DIR / "dual_source_skus.json"
 BULK_IMPORT_FILE = BASE_DIR / "bulk_import_progress.json"
@@ -625,20 +626,36 @@ def step_register(run_dir, manifest, progress, dry_run=False):
     flagged = set(progress.get("flagged_pricing", []))
     touched = list(progress.get("created", {})) + list(progress.get("updated", {}))
 
-    # 1) price_locks.json — every imported SKU @ MAP (or note when markup-priced)
+    # Reprice brands (reprice_brands.json) get competitor-undercut on their
+    # PARTS, so we must NOT blanket-lock their sheet SKUs here — build_reprice_
+    # targets.py owns the part/machine split for these brands (parts -> reprice
+    # targets, complete machines -> price_locks). Locking parts here would make
+    # build_reprice_targets skip them (it ignores anything already locked).
+    reprice_brands = set()
+    if REPRICE_BRANDS_FILE.exists():
+        reprice_brands = {b.strip().upper()
+                          for b in json.loads(REPRICE_BRANDS_FILE.read_text()) if b and b.strip()}
+    is_reprice_brand = manifest["brand"].strip().upper() in reprice_brands
+
+    # 1) price_locks.json — every imported SKU @ MAP (or note when markup-priced).
+    #    Skipped entirely for reprice brands (see above).
     locks = json.loads(PRICE_LOCKS_FILE.read_text()) if PRICE_LOCKS_FILE.exists() else {}
     added_locks = 0
-    for sku in touched:
-        if sku in locks:
-            continue
-        if sku not in rows:
-            log.warning(f"  {sku}: in progress but not in manifest — no lock written")
-            continue
-        price, source = resolve_price(rows[sku], flagged)
-        locks[sku] = (f"${price:.2f} MAP ({manifest['brand']} sheet {manifest['parsed_at']})"
-                      if source == "MAP" else
-                      f"{source} (sheet import {manifest['parsed_at']}) — treat as MAP-protected")
-        added_locks += 1
+    if is_reprice_brand:
+        log.info(f"  {manifest['brand']} is a reprice brand — skipping price-lock pass "
+                 f"(build_reprice_targets.py handles part/machine pricing)")
+    else:
+        for sku in touched:
+            if sku in locks:
+                continue
+            if sku not in rows:
+                log.warning(f"  {sku}: in progress but not in manifest — no lock written")
+                continue
+            price, source = resolve_price(rows[sku], flagged)
+            locks[sku] = (f"${price:.2f} MAP ({manifest['brand']} sheet {manifest['parsed_at']})"
+                          if source == "MAP" else
+                          f"{source} (sheet import {manifest['parsed_at']}) — treat as MAP-protected")
+            added_locks += 1
 
     # 2) dual_source_brands.json — new brand?
     brands = json.loads(DUAL_SOURCE_BRANDS_FILE.read_text()) if DUAL_SOURCE_BRANDS_FILE.exists() else []

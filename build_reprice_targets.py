@@ -55,13 +55,24 @@ TARGETS_FILE = BASE_DIR / "reprice_targets.json"
 # Complete machines (MAP-protected) — title starts with a machine family name
 # and the price is in machine territory. Parts that mention a family mid-title
 # ("Filter Bag Box FELIX and DART") or cheap branded accessories ("AIRBELT
-# Textile", $44.99) don't match. Verified against the full SEBO catalog:
-# matches exactly the 32 complete units, zero parts.
+# Textile", $44.99) don't match. Verified against the full SEBO catalog
+# (matches exactly the 32 complete units, zero parts) and the full Miele
+# catalog (34 complete units — vacuums, coffee machines, rotary irons, robot —
+# zero parts). Miele parts that lead with a family name, e.g. "Miele TriFlex
+# HX1 Electronic Unit Bracket Assembly" ($329), stay below MACHINE_MIN_PRICE
+# and so are correctly treated as reprice targets. Cheapest complete Miele
+# unit is Classic C1 Pure Suction at $399, comfortably above the threshold.
 MACHINE_TITLE = re.compile(
-    r'^(?:SEBO\s+)?('
+    r'^(?:(?:SEBO|MIELE)\s+)?('
+    # SEBO families
     r'AIRBELT\s+[DEKC]\d|AUTOMATIC\s+X\d|FELIX|DART\b|'
     r'\d{3}\s+MECHANICAL|ESSENTIAL\s+G\d|'
-    r'DUO\s+Brush\s+Machine|DISCO\s+Floor\s+Polisher'
+    r'DUO\s+Brush\s+Machine|DISCO\s+Floor\s+Polisher|'
+    # Miele families: canister vacuums, bagless canisters, cordless sticks,
+    # robot, coffee machines, rotary irons
+    r'Complete\s+C\d|Classic\s+C\d|Compact\s+C\d|'
+    r'Blizzard\s+CX\d|Boost\s+CX\d|Triflex\s+HX\d|Scout\s+RX\d|'
+    r'CM\s+\d|HM\s+\d|B\d+E\b'
     r')', re.I)
 MACHINE_MIN_PRICE = 380.0
 
