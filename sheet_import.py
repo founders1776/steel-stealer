@@ -320,7 +320,13 @@ def step_research_validate(run_dir, manifest, progress, dry_run=False):
 
 
 IMG_HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"}
+                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+               # Some dealer CDNs (bigcommerce, rainpos, certain Shopify shops)
+               # serve an HTML block page to a bare request and only return the
+               # real image when a Referer is present. PIL then rejects the HTML
+               # and the image is silently lost — so always send a Referer.
+               "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+               "Referer": "https://www.google.com/"}
 
 def step_images(run_dir, manifest, progress, dry_run=False):
     """Download image_urls from content files into images/<sku>/NN.jpg.
