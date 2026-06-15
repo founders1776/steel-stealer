@@ -63,7 +63,7 @@ TARGETS_FILE = BASE_DIR / "reprice_targets.json"
 # and so are correctly treated as reprice targets. Cheapest complete Miele
 # unit is Classic C1 Pure Suction at $399, comfortably above the threshold.
 MACHINE_TITLE = re.compile(
-    r'^(?:(?:SEBO|MIELE)\s+)?('
+    r'^(?:(?:SEBO|MIELE|LINDHAUS)\s+)?('
     # SEBO families
     r'AIRBELT\s+[DEKC]\d|AUTOMATIC\s+X\d|FELIX|DART\b|'
     r'\d{3}\s+MECHANICAL|ESSENTIAL\s+G\d|'
@@ -72,7 +72,13 @@ MACHINE_TITLE = re.compile(
     # robot, coffee machines, rotary irons
     r'Complete\s+C\d|Classic\s+C\d|Compact\s+C\d|'
     r'Blizzard\s+CX\d|Boost\s+CX\d|Triflex\s+HX\d|Scout\s+RX\d|'
-    r'CM\s+\d|HM\s+\d|B\d+E\b'
+    r'CM\s+\d|HM\s+\d|B\d+E\b|'
+    # Lindhaus complete machines: uprights, backpacks, sweepers, scrubber-driers.
+    # Power nozzles (PB12e/PB14e/M30e) are accessories -> intentionally EXCLUDED
+    # so they stay competitor-undercut targets like other parts. Parts that lead
+    # with a model token (e.g. "LW52 Disc Brush") stay under MACHINE_MIN_PRICE.
+    r'RX\b|Dynamic|Diamante|Valzer|Linda\b|CHpro|Hpro|LB3|LB4|Activa|HF6|'
+    r'LS38|LS50|LW30|LW35|LW38|LW44|LW46|LW52'
     r')', re.I)
 MACHINE_MIN_PRICE = 380.0
 
