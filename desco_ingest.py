@@ -463,6 +463,203 @@ def step_enrich(sess, progress, limit=None):
 
 # ── STEP 4: Export ────────────────────────────────────────────────────────────
 
+# ── Brand derivation ──────────────────────────────────────────────────────────
+#
+# Desco's source JSON leaves `brand` blank on ~80% of products. For vacuum parts,
+# the brand the part FITS (the leading token of the product name) is the correct
+# Shopify vendor. We normalise the name to uppercase tokens, check the two-token
+# slash combo first (e.g. ROYAL/DD, EUREKA/SANITAIRE), then the leading token,
+# against a curated alias map. Anything we can't map (hoses keyed only by length,
+# generic measurements, importer codes) falls back to "Universal" — every product
+# needs a vendor, so we never leave it blank.
+
+BRAND_ALIASES = {
+    # Major vacuum brands
+    "BISSELL": "Bissell",
+    "BISSEL": "Bissell",
+    "HOOVER": "Hoover",
+    "EUREKA": "Eureka",
+    "KIRBY": "Kirby",
+    "SEBO": "Sebo",
+    "ORECK": "Oreck",
+    "DYSON": "Dyson",
+    "ROYAL": "Royal",
+    "ROYAL/DD": "Royal",
+    "LUX": "Lux",
+    "ELECTROLUX": "Electrolux",
+    "PROTEAM": "ProTeam",
+    "PROTEAM/PROFORCE": "ProTeam",
+    "REXAIR": "Rexair",
+    "RAINBOW": "Rainbow",
+    "PANASONIC": "Panasonic",
+    "MIELE": "Miele",
+    "RICCAR": "Riccar",
+    "RICCAR/SIMPLICITY": "Riccar",
+    "SIMPLICITY": "Simplicity",
+    "TITAN": "Titan",
+    "SANITAIRE": "Sanitaire",
+    "EUREKA/SANITAIRE": "Eureka",
+    "EUREKA/ELECTROLUX": "Eureka",
+    "ROYAL/HOOVER": "Royal",
+    "ELECTROLUX/BEAM": "Electrolux",
+    "PANASONIC/KENMORE": "Panasonic",
+    "PAN": "Panasonic",          # "PAN MCUG... " / "PAN / KEN ..."
+    "LINDHAUS": "Lindhaus",
+    "EUROCLEAN": "Euroclean",
+    "HAKO": "Hako",
+    "TORNADO": "Tornado",
+    "SHARK": "Shark",
+    "KENMORE": "Kenmore",
+    "KOBLENZ": "Koblenz",
+    "WINDSOR": "Windsor",
+    "FANTOM": "Fantom",
+    "REGINA": "Regina",
+    "METROPOLITAN": "Metropolitan",
+    "DUSTCARE": "DustCare",
+    "VAPAMORE": "Vapamore",
+    "READIVAC": "ReadiVac",
+
+    # Motors / powerhead lines
+    "LAMB": "Lamb Ametek",
+    "AMETEK": "Lamb Ametek",
+    "WESSEL": "Wessel-Werk",
+    "WESSEL-WERK": "Wessel-Werk",
+    "WESSELL": "Wessel-Werk",
+    "EBK360": "Wessel-Werk",
+    "EBK340": "Wessel-Werk",
+    "HEB160": "Wessel-Werk",
+    "TURBOCAT": "Turbocat",
+    "T210": "Turbocat",
+    "HP": "Turbocat",
+    "PLASTIFLEX": "Plastiflex",
+    "PLSTFLX": "Plastiflex",
+
+    # Commercial / cleaning machine brands
+    "NUMATIC": "NaceCare",
+    "NACECARE": "NaceCare",
+    "NUMATIC/NACECARE": "NaceCare",
+    "NUMATIC/NACE": "NaceCare",
+    "NSS": "NSS",
+    "NILFISK": "Nilfisk",
+    "ADVANCE": "Advance",
+    "CASTEX": "Castex",
+    "TENNANT": "Tennant",
+    "NOBLES": "Nobles",
+    "PULLMAN": "Pullman",
+    "MASTERCRAFT": "Mastercraft",
+    "INTERVAC": "Intervac",
+    "ASCENDANT": "Ascendant",
+
+    # Central-vac / hose-system brands
+    "VACUMAID": "VacuMaid",
+    "VACULINE": "Vaculine",
+    "HAYDEN": "Hayden",
+    "HIDE-A-HOSE": "Hide-A-Hose",
+    "HIDE": "Hide-A-Hose",
+    "HAH": "Hide-A-Hose",
+    "RETRACTABLE": "Hide-A-Hose",
+    "NADAIR": "Nadair",
+    "AIR-WAY": "Air-Way",
+    "VACUFLO": "VacuFlo",
+    "BEAM": "Beam",
+    "NUTONE": "NuTone",
+    "CANAVAC": "Canavac",
+    "DUOVAC": "Duovac",
+    "VROOM": "Vroom",
+    "WALLY": "Wally",
+    "DECO": "Deco",
+    "VEX": "Vex",
+    "VACPORT": "VacPort",
+    "GENIE": "Vacu-Genie",
+    "CEN-TEC": "Cen-Tec",
+    "CENTEC": "Cen-Tec",
+    "CENTRAL": "Central Vac",
+    "GRAND": "Grand",
+    "SPOTTY": "Spotty",
+    "VAC": "Vac N Clean",         # "VAC N CLEAN ..."
+
+    # Importer / private-label part lines
+    "JOHNNY": "Johnny Vac",
+    "JV": "Johnny Vac",
+    "FITALL": "Fit All",
+    "FILTER": "Filter Queen",     # "FILTER QUEEN ..."
+    "FILTERQUEEN": "Filter Queen",
+    "DIRT": "Dirt Devil",         # "DIRT DEVIL ..."
+    "DIRTDEVIL": "Dirt Devil",
+    "PERFECT": "Perfect Fit Hoses",
+    "CLEAN": "CleanMax",          # CLEAN MAX / CLEAN OBSESSED
+    "CLEAN-OBSESSED": "CleanMax",
+    "SHOP": "Shop-Vac",           # "SHOP-VAC ..." / "SHOP VAC ..."
+    "STAIN-X": "Stain-X",
+    "ROGERS": "Rogers",
+    "VACYUM": "Vacyum",
+    "JANITIZED": "Janitized",
+    "CLICK": "Click",
+    "MD": "MD",
+}
+
+
+def _lookup_alias(text):
+    """Run a string's leading token(s) through BRAND_ALIASES.
+
+    Tries the two-token slash combo first ("ROYAL/DD", "EUREKA/SANITAIRE"),
+    then the leading token (which may itself embed a slash combo such as
+    "NUMATIC/NACECARE"). Returns the canonical vendor string, or None if no
+    leading token maps. Case-insensitive — BRAND_ALIASES keys are uppercase.
+    """
+    if not text:
+        return None
+    tokens = re.sub(r"[^A-Za-z0-9/-]", " ", text.upper()).split()
+    if not tokens:
+        return None
+
+    first = tokens[0]
+    if len(tokens) >= 2:
+        combo = f"{first}/{tokens[1]}"
+        if combo in BRAND_ALIASES:
+            return BRAND_ALIASES[combo]
+    if first in BRAND_ALIASES:
+        return BRAND_ALIASES[first]
+    return None
+
+
+def _title_case_brand(raw):
+    """Title-case an unmapped source brand, e.g. "PERFECT FIT HOSES" →
+    "Perfect Fit Hoses". Only used as a fallback when a source brand's leading
+    token is absent from BRAND_ALIASES — known stylizations live in the alias
+    VALUES and resolve via _lookup_alias before we ever reach here.
+    """
+    return " ".join(w.capitalize() for w in raw.split())
+
+
+def derive_brand(name):
+    """Return a canonical Shopify vendor for a (usually brand-less) product name.
+
+    Matches the leading token(s) against BRAND_ALIASES. Unmappable items
+    (length-only hoses, measurements, importer codes) fall back to "Universal"
+    so no product is left without a vendor.
+    """
+    return _lookup_alias(name) or "Universal"
+
+
+def canonicalize_brand(raw_brand, name):
+    """Resolve any product to a single canonical Shopify vendor.
+
+    Source brands and brand-less names flow through the SAME alias lookup so
+    "EUREKA" (source) and a name starting "EUREKA ..." (derived) both resolve
+    to "Eureka". BRAND_ALIASES values are the single source of truth for
+    canonical casing.
+
+    - Non-empty source brand: look it up in the alias map; if it maps, return
+      the canonical value. If it does not map (an unusual source brand), return
+      it Title-Cased.
+    - Empty source brand: derive from the product name (existing behavior).
+    """
+    if raw_brand:
+        return _lookup_alias(raw_brand) or _title_case_brand(raw_brand)
+    return derive_brand(name)
+
+
 def step_export(progress, dry_run=False):
     log.info("=" * 60)
     log.info("STEP 4: Export desco_products.json")
@@ -485,23 +682,43 @@ def step_export(progress, dry_run=False):
             continue
         by_sku[sku] = record
 
+    # Canonicalize EVERY product's brand through one normalizer so source
+    # brands ("EUREKA") and name-derived brands both resolve to a single
+    # canonical vendor ("Eureka") — no case-duplicate Shopify vendors.
+    # Work on shallow copies so we never write canonical brands back into the
+    # progress file (which would erase the source-vs-derived distinction and
+    # break re-runs).
+    derived_brand = 0
+    for sku, record in list(by_sku.items()):
+        had_source = bool(record["brand"])
+        record = dict(record)
+        record["brand"] = canonicalize_brand(record["brand"], record["clean_name"])
+        by_sku[sku] = record
+        if not had_source:
+            derived_brand += 1
+
     total = len(by_sku)
     with_image = sum(1 for r in by_sku.values() if r["image_urls"])
     in_stock = sum(1 for r in by_sku.values() if r["in_stock"])
     empty_brand = sum(1 for r in by_sku.values() if not r["brand"])
+    universal_brand = sum(1 for r in by_sku.values() if r["brand"] == "Universal")
 
     brand_counts = Counter(r["brand"] or "(empty)" for r in by_sku.values())
-    top_brands = brand_counts.most_common(10)
+    top_brands = brand_counts.most_common(20)
+    distinct_vendors = len(brand_counts)
 
     log.info(f"Total products (by SKU):  {total}")
     log.info(f"  with image_urls:        {with_image}")
     log.info(f"  in stock:               {in_stock}")
-    log.info(f"  empty brand:            {empty_brand} "
-             f"(downstream derives brand)")
+    log.info(f"  brands derived:         {derived_brand} (filled from name)")
+    log.info(f"  empty brand:            {empty_brand}")
+    log.info(f"  Universal (generic):    {universal_brand} "
+             f"(un-mappable: length-only hoses, measurements, importer codes)")
     if dup_skus:
         log.info(f"  duplicate SKUs merged:  {dup_skus}")
     log.info(f"  skipped (no sku/price): {len(progress['skipped'])}")
-    log.info("Top 10 brands:")
+    log.info(f"  distinct vendors:       {distinct_vendors}")
+    log.info("Top 20 brands:")
     for brand, count in top_brands:
         log.info(f"    {count:>5}  {brand}")
 
