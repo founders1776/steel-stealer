@@ -22,19 +22,21 @@ One new ingestion adapter for Desco; everything downstream is reused because it 
 
 ## Architecture
 
-### Phase 0 — Desco access investigation (GATE)
-Research Desco's dealer portal/site (candidate domains incl. descovac.com / descovacs.com). Determine whether a complete API exists (catalog list, per-product dealer cost, stock/availability, image URLs, auth model). Output: `docs/desco_access_findings.md` documenting endpoints/auth OR a "no API → scrape" recommendation. **The ingestion section below finalizes after Phase 0.** No build past this gate without confirmed access shape.
+### Phase 0 — Desco access investigation (DONE — see `docs/desco_access_findings.md`)
+Desco = `descovac.com`, CIMcloud (classic-ASP) B2B platform, fully login-walled. A CIMcloud REST API exists but is a gated paid add-on requiring Desco to issue an API token (business ask, deferred). **Decision: authenticated scrape now** using the dealer login. Images on public CloudFront CDN (no auth). No Cloudflare observed → plain `requests` may suffice; fall back to undetected-chromedriver (Steel City pattern) if blocked under auth.
 
 ### Source identifier
 - **Metafield** `custom.source` (single_line_text), values `steel_city` | `desco`, on every product. Definition created once via GraphQL `metafieldDefinitionCreate`.
 - **Backfill pass** (`backfill_source.py`, one-time): sets `custom.source` on all existing imported products. Steel City + sheet-import (Miele/Lindhaus) → derive source from the existing progress files (`bulk_import_progress.json`, `missing_import_progress.json` → steel_city; sheet_import runs → their brand's distributor). Pre-existing ~1,399 store products: leave untagged (not ours) or tag `steel_city` only if in our progress files.
 - **Local mirror** `source_map.json` (SKU → source) so offline tooling (sync, reprice) resolves source without Shopify calls.
 
-### Ingestion — `desco_ingest.py` (new)
-- Pull Desco catalog via the Phase-0-confirmed API.
-- Normalize each record to the existing `product_names.json` shape: `{sku, brand, clean_name, dealer_cost, in_stock, image_urls[], description?, source:"desco"}`.
-- Write `desco_products.json` (Desco's source-of-truth file, sibling to `product_names.json`).
-- Resumable, paginated, rate-limited (mirror existing script conventions).
+### Ingestion — `desco_ingest.py` (new) — authenticated scrape
+- **Auth:** classic-ASP form login to descovac.com using `DESCO_EMAIL`/`DESCO_PASSWORD` from `.env` (mirrors SC_* pattern). Establish session cookie; prefer plain `requests` (no Cloudflare seen), fall back to undetected-chromedriver v145 if blocked. First step: capture live `signin.asp` form field names + POST action.
+- **Discover:** enumerate categories/products via `pc_combined_results.asp` (category `pc_id`s) + search, paginated — analogous to `catalog_scraper.py`'s discovery.
+- **Enrich:** per product, parse `pc_product_detail.asp` for name, brand, dealer cost, stock, and image refs (CloudFront `dqmy05zjbnp6b.cloudfront.net`).
+- Normalize each record to the existing `product_names.json` shape: `{sku, brand, clean_name, dealer_cost, in_stock, image_urls[], source:"desco"}`.
+- Write `desco_products.json` (Desco source-of-truth, sibling to `product_names.json`). Resumable, paginated, rate-limited.
+- **Verify under auth (first run):** dealer-specific cost present? stock = bool/qty/per-warehouse? any bot protection? — adjust parser accordingly.
 
 ### Dedup — reuse `sheet_import` matcher
 - For every Desco SKU: match against the live store (exact + O↔0 fuzzy within vendor), double-checked live via GraphQL — the existing `sheet_import.step_match` logic.
