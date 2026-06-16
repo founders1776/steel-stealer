@@ -42,3 +42,11 @@ competitor_domains.json
 competitor_discovery_progress.json
 reprice_brands.json
 reprice_targets.json
+
+# Desco distributor data (dealer costs + source map) — ships via encrypted CI bundle
+desco_products.json
+desco_ingest_progress.json
+source_map.json
+desco_imports/
+desco_crawl.log
+source_backfill.log
