@@ -37,6 +37,15 @@ jobs:
               --decrypt data.tar.gz.gpg | tar xz
           ls -la product_names.json shopify_product_map.json
 
+      - name: Mask competitor domains in logs
+        run: |
+          # PUBLIC repo → Action logs are world-readable. Register every domain-like
+          # token in competitor_prices.json as a log mask so GitHub redacts it (***)
+          # if any step echoes it. Structure-agnostic (regex over the file).
+          if [ -f competitor_prices.json ]; then
+            python3 -c "import re; [print('::add-mask::'+d) for d in sorted(set(re.findall(r'[a-z0-9][a-z0-9-]*\.(?:com|net|org|co|shop|store|us)', open('competitor_prices.json').read().lower())))]"
+          fi
+
       - name: Materialize dual-source brand list
         env:
           DUAL_SOURCE_BRANDS: ${{ secrets.DUAL_SOURCE_BRANDS }}

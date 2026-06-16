@@ -50,6 +50,15 @@ jobs:
             echo "WARNING: COMPETITORS_JSON secret unset and none in bundle — scrape will be skipped"
           fi
 
+      - name: Mask competitor domains in logs
+        run: |
+          # PUBLIC repo → Action logs are world-readable. scrape_competitor_prices.py
+          # prints per-domain progress; register each domain as a log mask so GitHub
+          # redacts it (***) everywhere in this job's logs.
+          if [ -f competitors.json ]; then
+            python3 -c "import json; [print('::add-mask::'+c['domain']) for c in json.load(open('competitors.json')).get('competitors',[]) if c.get('domain')]"
+          fi
+
       - name: Materialize reprice brand list
         env:
           REPRICE_BRANDS: ${{ secrets.REPRICE_BRANDS }}
