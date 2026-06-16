@@ -36,6 +36,7 @@ import requests  # fallback for single-request operations
 
 BASE_DIR = Path(__file__).parent
 PRODUCTS_FILE = BASE_DIR / "product_names.json"
+DESCO_PRODUCTS_FILE = BASE_DIR / "desco_products.json"
 REPRICE_TARGETS_FILE = BASE_DIR / "reprice_targets.json"
 COMPETITORS_FILE = BASE_DIR / "competitors.json"
 PROGRESS_FILE = BASE_DIR / "competitor_price_progress.json"
@@ -347,6 +348,18 @@ def main():
                 seen.add(sku)
                 added += 1
         log.info(f"Reprice targets merged: +{added} SKUs")
+
+    # Desco (second distributor) — net-new SKUs live in desco_products.json, not
+    # product_names.json. Merge them so every sellable item gets competitor data.
+    if DESCO_PRODUCTS_FILE.exists():
+        desco = json.loads(DESCO_PRODUCTS_FILE.read_text())
+        added = 0
+        for sku, d in desco.items():
+            if sku not in seen:
+                skus_with_products.append((sku, {"price": str(d.get("dealer_cost") or "")}))
+                seen.add(sku)
+                added += 1
+        log.info(f"Desco products merged: +{added} SKUs")
 
     log.info(f"Total unique SKUs: {len(skus_with_products)}")
 

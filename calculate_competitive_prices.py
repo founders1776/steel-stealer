@@ -39,21 +39,8 @@ MARKUP_TIERS = [
     (float("inf"), 1.4),
 ]
 
-MIN_PRICE = 6.99
-
-# ── Undercut tiers ──────────────────────────────────────────────────────────
-
-UNDERCUT_TIERS = [
-    (20,   0.50),
-    (50,   1.00),
-    (100,  2.00),
-    (300,  5.00),
-    (float("inf"), 10.00),
-]
-
-# Shopify fees: 2.9% + $0.30 per transaction
-SHOPIFY_FEE_RATE = 0.029
-SHOPIFY_FEE_FIXED = 0.30
+MIN_PRICE = 6.99      # store display floor — nothing listed below this
+MIN_MARGIN = 0.20     # minimum gross margin: (price - cost) / price >= 20%
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -90,20 +77,44 @@ def calculate_markup_price(cost):
     return max(retail, MIN_PRICE)
 
 
-def calculate_break_even(cost):
-    """Break-even = dealer cost + Shopify fees (2.9% + $0.30)."""
-    # We need: price - (price * 0.029 + 0.30) >= cost
-    # price * (1 - 0.029) >= cost + 0.30
-    # price >= (cost + 0.30) / 0.971
-    return (cost + SHOPIFY_FEE_FIXED) / (1 - SHOPIFY_FEE_RATE)
+def margin_floor(cost):
+    """Lowest price holding MIN_MARGIN gross margin: price >= cost / (1 - MIN_MARGIN).
+    The undercut gate. The $6.99 store floor is a separate final clamp."""
+    return cost / (1 - MIN_MARGIN)
 
 
-def get_undercut(competitor_avg):
-    """Get undercut amount based on price tier."""
-    for max_price, undercut in UNDERCUT_TIERS:
-        if competitor_avg < max_price:
-            return undercut
-    return UNDERCUT_TIERS[-1][1]
+def filter_competitor_prices(sku, ref_price, comp_data):
+    """Validated competitor prices: within 0.5x-5x of ref_price and where the SKU
+    appears in the matched title/URL. Mirrors sync_stock_prices.filter_competitor_prices
+    so both pipelines reject accessory/clone mismatches identically."""
+    sku_lower = sku.lower()
+    sku_norm = re.sub(r'[\-\s\.]', '', sku).lower()
+    valid_prices = []
+    for _domain, cdata in comp_data.get("competitors", {}).items():
+        if not cdata or not cdata.get("price"):
+            continue
+        ratio = cdata["price"] / ref_price if ref_price and ref_price > 0 else 1
+        if not (0.50 <= ratio <= 5.0):
+            continue
+        comp_title = (cdata.get("title") or "").lower()
+        comp_url = (cdata.get("url") or "").split("?")[0].lower()
+        comp_text = comp_title + " " + comp_url
+        comp_text_norm = re.sub(r'[\-\s\.]', '', comp_text)
+        if sku_lower not in comp_text and sku_norm not in comp_text_norm:
+            continue
+        valid_prices.append(cdata["price"])
+    return valid_prices
+
+
+def competitive_target(valid_prices, floor):
+    """Walk competitors low→high; undercut the cheapest beatable one by $1 while
+    holding `floor`. Returns the pre-clamp undercut price, or None if none clear
+    the floor."""
+    for comp in sorted(valid_prices):
+        raw = charm_price(comp - 1.00)
+        if raw >= floor:
+            return raw
+    return None
 
 
 def main():
@@ -158,7 +169,7 @@ def main():
             }
             continue
 
-        break_even = round(calculate_break_even(dealer_cost), 2)
+        floor = round(margin_floor(dealer_cost), 2)
         markup_price = calculate_markup_price(dealer_cost)
 
         # Check for competitor data
@@ -169,7 +180,7 @@ def main():
             final_price = markup_price
             decisions[sku] = {
                 "dealer_cost": dealer_cost,
-                "break_even": break_even,
+                "margin_floor": floor,
                 "final_price": final_price,
                 "method": "markup_no_data",
                 "old_retail": old_retail,
@@ -178,42 +189,39 @@ def main():
                 products[key]["retail_price"] = f"${final_price:.2f}"
             continue
 
-        # Competitor data available
-        competitor_avg = comp_data["avg_price"]
-        competitor_min = comp_data.get("min_price", competitor_avg)
+        # Validated competitor prices (rejects accessory/clone mismatches).
+        valid_prices = filter_competitor_prices(sku, dealer_cost, comp_data)
+        if not valid_prices:
+            stats["markup_fallback_no_data"] += 1
+            final_price = markup_price
+            decisions[sku] = {
+                "dealer_cost": dealer_cost,
+                "margin_floor": floor,
+                "final_price": final_price,
+                "method": "markup_no_valid_data",
+                "old_retail": old_retail,
+            }
+            if not args.dry_run:
+                products[key]["retail_price"] = f"${final_price:.2f}"
+            continue
 
-        # Strategy: Try to beat the lowest competitor by $1.
-        # If that's below break-even, fall back to average price with tiered undercut.
-        target_min = charm_price(competitor_min - 1.00)
-        target_min = max(target_min, MIN_PRICE)
-
-        if target_min >= break_even:
-            # We can beat the lowest competitor — do it
+        # Walk competitors low→high; undercut the cheapest beatable by $1 at the
+        # 20% margin floor, else tiered markup. $6.99 store floor clamps after.
+        target = competitive_target(valid_prices, margin_floor(dealer_cost))
+        if target is not None:
             stats["competitor_priced"] += 1
-            final_price = target_min
-            method = "competitor_beat_lowest"
+            final_price = max(target, MIN_PRICE)
+            method = "competitor_undercut"
         else:
-            # Can't beat lowest profitably — try average with tiered undercut
-            undercut = get_undercut(competitor_avg)
-            target_avg = charm_price(competitor_avg - undercut)
-            target_avg = max(target_avg, MIN_PRICE)
-
-            if target_avg >= break_even:
-                stats["competitor_priced"] += 1
-                final_price = target_avg
-                method = "competitor_avg_undercut"
-            else:
-                # Both below break-even — fall back to tiered markup
-                stats["markup_fallback_below_breakeven"] += 1
-                final_price = markup_price
-                method = "markup_below_breakeven"
+            stats["markup_fallback_below_breakeven"] += 1
+            final_price = markup_price
+            method = "markup_below_floor"
 
         decisions[sku] = {
             "dealer_cost": dealer_cost,
-            "break_even": break_even,
-            "competitor_avg": competitor_avg,
-            "competitor_min": competitor_min,
-            "num_competitors": comp_data.get("num_competitors", 0),
+            "margin_floor": floor,
+            "competitor_min": round(min(valid_prices), 2),
+            "num_competitors": len(valid_prices),
             "final_price": final_price,
             "method": method,
             "old_retail": old_retail,
@@ -221,7 +229,7 @@ def main():
 
         if not args.dry_run:
             products[key]["retail_price"] = f"${final_price:.2f}"
-            products[key]["competitor_price"] = f"${competitor_avg:.2f}"
+            products[key]["competitor_price"] = f"${round(sum(valid_prices) / len(valid_prices), 2):.2f}"
 
     # Output
     output = {

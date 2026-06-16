@@ -3,7 +3,15 @@ name: Sync Stock & Prices
 on:
   schedule:
     - cron: '0 6,18 * * *'  # Every 12 hours (6am, 6pm UTC)
-  workflow_dispatch: {}       # Manual trigger button
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        type: choice
+        default: full
+        options:
+          - full                  # Steel City stock/cost loop + all reprice passes (both-ways)
+          - competitive-up-only   # one-time: whole-catalog competitor reprice, RAISES only, no browser
 
 permissions:
   contents: write
@@ -87,7 +95,15 @@ jobs:
           SC_ACCOUNT: ${{ secrets.SC_ACCOUNT }}
           SC_USER: ${{ secrets.SC_USER }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
-        run: xvfb-run --auto-servernum python sync_stock_prices.py
+          RUN_MODE: ${{ github.event.inputs.mode || 'full' }}
+        run: |
+          if [ "$RUN_MODE" = "competitive-up-only" ]; then
+            # One-time whole-catalog competitor reprice, raises only. Price-only
+            # pass — no Steel City browser needed, so no xvfb.
+            python sync_stock_prices.py --competitive-reprice --up-only
+          else
+            xvfb-run --auto-servernum python sync_stock_prices.py
+          fi
 
       - name: Re-encrypt and commit data bundle
         if: always() && steps.sync.outcome != 'cancelled'

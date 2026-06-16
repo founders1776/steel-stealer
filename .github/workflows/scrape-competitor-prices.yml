@@ -95,6 +95,10 @@ jobs:
 
       - name: Calculate competitive pricing decisions
         run: |
+          # pipefail: without it the pipeline exit code is tee's (always 0),
+          # which silently swallowed a crashed calculate step and reported the
+          # whole job green for ~2 months (see incident 2026-06-16).
+          set -o pipefail
           if [ -f competitor_prices.json ]; then
             python calculate_competitive_prices.py 2>&1 | tee /tmp/pricing_output.txt
           else

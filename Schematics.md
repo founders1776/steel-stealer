@@ -369,12 +369,35 @@ Phase 3c: Automated Stock & Price Sync
     - in price_locks.json (machines auto-locked at MAP) → skip
     - no validated competitor price → NO CHANGE (markup fallback
       NEVER applies — these prices aren't Steel City cost-derived)
-    - undercut: beat lowest by $1, else tiered avg undercut
+    - undercut: WALK competitors low→high, undercut the cheapest one
+      we can beat by $1 while holding the floor (skip the unbeatable)
     - floor: break_even(dealer_cost) when Steel City carries the SKU,
       else ref_price × 0.70 (ref_price = store price when first
       targeted; preserved across rebuilds so the floor can't ratchet)
     - PUT variant price only — never stock/status/inventory
     `--reprice-only` flag runs just this pass (no browser, fast)]
+       |
+  [Competitive reprice pass — runs SECOND, no browser needed (skipped
+   only in legacy --reprice-only mode):
+    run_competitive_reprice — the WHOLE catalog, BOTH distributors.
+    Candidate set = product_names.json ∪ desco_products.json. Keep a
+    SKU when: has a Shopify variant + a dealer cost + validated
+    competitor data, AND not price-locked, AND not dual-source
+    (those are owned by the reprice_targets pass above). Genuine
+    pre-existing store products are excluded automatically (no entry
+    in product_names/desco → no cost). NOTE: this pass does NOT use
+    the bulk_import_progress ownership gate — data-ownership + cost +
+    competitor data is the gate (so ungated catalog SKUs like the
+    Hoover 440013719 harness finally get repriced).
+    Per SKU:
+    - undercut WALK: beat cheapest beatable competitor by $1
+    - margin gate = cost / 0.80 (20% gross); else tiered markup
+    - $6.99 store display floor = final clamp (NOT a margin gate)
+    - old price from product_names retail, else live Shopify GET
+      (Desco-only SKUs have no local retail)
+    - PUT variant price only (cost=None — never overwrite cost-per-item)
+    `--competitive-reprice` runs just this pass; `--up-only` (any run)
+    never lowers a known price — used for the first stale-data fix]
        |
   [Launch browser → login to Steel City → batch API calls (8 concurrent)]
        |
@@ -384,8 +407,11 @@ Phase 3c: Automated Stock & Price Sync
               inventory_policy=deny, qty=0, status=active (keep SEO URL)]
   [qty 0→1 → set_in_stock: variant qty=new_qty, status=active]
   [NLA detected in API name/desc → set_oos_unbuyable + NLA metafield]
-  [cost increased → recalculate retail via markup tiers → PUT variant price + cost]
+  [cost increased → get_best_price (competitor undercut walk + 20% margin
+    floor, $6.99 clamp, else markup tiers) → PUT variant price + cost]
   [cost decreased → NO ACTION (protect margins)]
+  [--up-only: never lower a listed price this run (cost-per-item may still
+    correct upward)]
        |
   [Update product_names.json + append to sync_log.json]
        |
@@ -412,14 +438,17 @@ Phase 4: Weekly Competitor Price Refresh
       and ref_price floor anchor (preserved for existing targets)]
        |
   [scrape_competitor_prices.py — product_names SKUs + reprice target
-   SKUs merged in → async Shopify suggest API across competitors.json]
+   SKUs + desco_products.json SKUs merged in → async Shopify suggest
+   API across competitors.json]
        |
   competitor_prices.json  ← SKU → {avg, min, per-domain prices}
        |
-  [calculate_competitive_prices.py → pricing_decisions.json (email report)]
+  [calculate_competitive_prices.py → pricing_decisions.json (email report);
+   uses the same walk + 20% margin floor as the sync]
        |
   [Re-encrypt bundle + commit → the 12h sync applies the new prices
-   (Steel City SKUs in its main loop, reprice targets in its pass)]
+   (Steel City SKUs in its main loop; SEBO in the reprice_targets pass;
+   the whole catalog incl. Desco in the competitive reprice pass)]
 
 Dealer Sheet Import
 ────────────────────
@@ -536,9 +565,10 @@ Ops notes:
 | `reprice_brands.json` | Phase 4 — brands whose parts get competitor repricing despite the dual-source skip (e.g. `["SEBO"]`); CI materializes from REPRICE_BRANDS secret |
 | `build_reprice_targets.py` | Phase 4 — builds reprice_targets.json from the live store per reprice brand; auto-locks complete machines into price_locks.json (MAP) |
 | `reprice_targets.json` | Phase 4 — competitor-undercut allowlist: SKU → {variant_id, dealer_cost, ref_price floor anchor, last_applied} |
-| `scrape_competitor_prices.py` | Phase 4 — async competitor price scrape (product_names SKUs + reprice targets) |
+| `scrape_competitor_prices.py` | Phase 4 — async competitor price scrape (product_names + reprice targets + desco_products SKUs) |
 | `competitor_prices.json` | Phase 4 — aggregated competitor prices per SKU (consumed by the sync's pricing) |
-| `calculate_competitive_prices.py` | Phase 4 — pricing decision report (pricing_decisions.json, emailed weekly) |
+| `calculate_competitive_prices.py` | Phase 4 — pricing decision report (pricing_decisions.json, emailed weekly); same walk + 20% margin floor as the sync |
+| `run_competitive_reprice` (in `sync_stock_prices.py`) | Phase 4 — whole-catalog competitor reprice pass (product_names ∪ desco_products); undercut walk, 20% gross margin floor, $6.99 store floor; `--competitive-reprice` / `--up-only` |
 | `.github/workflows/scrape-competitor-prices.yml` | Phase 4 — weekly competitor refresh (Sun 2am UTC), re-encrypts bundle |
 | `shopify_product_map.json` | Phase 3c — SKU → {product_id, variant_id, vendor} mapping (vendor drives dual-source skip) |
 | `sync_log.json` | Phase 3c — append-only log of all sync runs |
@@ -677,7 +707,8 @@ python3 shopify_upload.py upload            # Upload to Shopify + generate CSV
 python3 build_shopify_map.py               # One-time: build SKU → Shopify ID mapping
 python3 sync_stock_prices.py               # Full sync (resumable)
 python3 sync_stock_prices.py --dry-run     # Preview changes without touching Shopify
-python3 sync_stock_prices.py --reprice-only --dry-run  # Just the competitor reprice pass (no browser)
+python3 sync_stock_prices.py --reprice-only --dry-run  # Just the SEBO/dual-source reprice_targets pass (no browser)
+python3 sync_stock_prices.py --competitive-reprice --up-only --dry-run  # Whole-catalog competitor reprice, raises only (first stale-data fix)
 
 # Phase 4 — Competitor repricing
 python3 build_reprice_targets.py           # Refresh reprice_targets.json + auto-lock machines (reads Shopify)
