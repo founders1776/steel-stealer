@@ -27,6 +27,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -57,7 +58,7 @@ DUAL_SOURCE_SKUS_FILE = BASE_DIR / "dual_source_skus.json"
 BULK_IMPORT_FILE = BASE_DIR / "bulk_import_progress.json"
 MISSING_IMPORT_FILE = BASE_DIR / "missing_import_progress.json"
 
-MIN_IMAGE_PX = 200          # reject thumbnails smaller than this on either axis
+MIN_IMAGE_PX = int(os.environ.get("MIN_IMAGE_PX", "200"))  # reject thumbnails smaller than this on either axis (env-overridable: Desco has legit short part photos, e.g. thin belts/wands)
 MAX_IMAGES_PER_PRODUCT = 8
 THIN_DESCRIPTION_CHARS = 200  # below this, an existing card's description is "thin"
 ENRICH_IMAGE_THRESHOLD = 2    # existing cards with fewer images than this get ours
