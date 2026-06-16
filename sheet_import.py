@@ -454,13 +454,16 @@ def step_create(run_dir, manifest, progress, dry_run=False):
             log.warning(f"  SKIP {sku}: {source}")
             continue
 
+        # Per-row vendor (multi-brand runs like Desco set row["vendor"]);
+        # single-brand sheet runs (Miele/Lindhaus) fall back to manifest vendor.
+        vendor = row.get("vendor") or manifest["vendor"]
         product = {
             "title": c["title"],
             "body_html": c["body_html"],
-            "vendor": manifest["vendor"],
+            "vendor": vendor,
             "status": "draft",
             "tags": ", ".join(generate_tags({
-                "clean_name": c["title"], "brand": manifest["vendor"], "model": ""})),
+                "clean_name": c["title"], "brand": vendor, "model": ""})),
             "metafields_global_title_tag": c.get("meta_title", c["title"]),
             "metafields_global_description_tag": c.get("meta_description", ""),
             "variants": [{

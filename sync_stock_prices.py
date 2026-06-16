@@ -780,6 +780,24 @@ def run_sync(driver, dry_run=False, reprice_only=False):
         if added:
             log.info(f"  + {added} from missing_import_progress → {len(our_product_ids)} total")
 
+    # Desco-distributor imports (second supplier) — markup-priced + stock-tracked
+    # like Steel City, so the sync owns them too. Created product ids live in the
+    # per-run sheet-import progress under desco_imports/<date>/progress.json.
+    before = len(our_product_ids)
+    for desco_prog in BASE_DIR.glob("desco_imports/*/progress.json"):
+        try:
+            with open(desco_prog) as f:
+                created = json.load(f).get("created", {})
+        except (json.JSONDecodeError, OSError):
+            continue
+        for pid in created.values():
+            pid = pid if isinstance(pid, str) else (pid or {}).get("id")
+            if pid:
+                our_product_ids.add(str(pid))
+    added = len(our_product_ids) - before
+    if added:
+        log.info(f"  + {added} from Desco imports → {len(our_product_ids)} total")
+
     # Load dual-source exclusion list (products available from both Steel City
     # AND the store's direct dealers — inventory should NOT be tracked against SC)
     dual_source_skus = set()

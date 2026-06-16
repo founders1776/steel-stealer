@@ -685,3 +685,47 @@ python3 build_reprice_targets.py --dry-run # Report counts without writing
 python3 scrape_competitor_prices.py        # Async competitor price scrape (~30-60 min)
 python3 calculate_competitive_prices.py --dry-run  # Pricing decision report
 ```
+
+## Desco — Second Distributor (descovac.com)
+
+Second supplier alongside Steel City. Source-neutral downstream: the sync/reprice
+key on product_id + SKU, and a `custom.source` metafield records the distributor.
+
+**Ingest** — `desco_ingest.py` (authenticated scrape, plain `requests`, no browser).
+Login form POST to `security_logonscript_sitefront.asp` (creds `DESCO_EMAIL`/`DESCO_PASSWORD`).
+Catalog data is embedded server-side as `"products":[…]` JSON in
+`pc_combined_results.asp?pc_id=<32hex>` category pages (largest block = result set);
+categories enumerated from the homepage megamenu (full tree). Brands derived +
+canonicalized from the product name (`BRAND_ALIASES`; generic → "Universal").
+`type:parent` exploded-view diagram headers are skipped (no price). Images at
+`https://www.descovac.com/images/products/<sku>_l.jpg`.
+→ writes `desco_products.json` (5,661 products, 81 vendors), `desco_ingest_progress.json`.
+
+**Source tag** — `source_metafield.py`: creates the `custom.source` product
+metafield (steel_city | desco | comma-joined multi) and backfills it on existing
+products; mirrors to `source_map.json`.
+
+**Net-new pipeline** — reuses `sheet_import.py` over `desco_imports/<date>/`
+(manifest → match/dedupe vs live store → research (Claude agents) → images
+(rembg+2048+VaM) → create DRAFTS). `step_create` reads per-row `vendor`
+(multi-brand). No `register`/MAP-lock pass — Desco parts are markup-priced and
+competitor-undercuttable like Steel City. Channels published via the EVAC
+publications-scoped token (all except Point of Sale).
+
+**Sync** — `sync_stock_prices.py` adds `desco_imports/*/progress.json` created ids
+to its "our products" gate, so Desco products get stock reactivation + cost-rise
+repricing like Steel City.
+
+**CI bundle** — `desco_products.json`, `desco_ingest_progress.json`, `source_map.json`
+added to the encrypted bundle tar list in BOTH workflows.
+
+```bash
+# Desco ingest
+python3 desco_ingest.py --step all              # full crawl → desco_products.json
+python3 desco_ingest.py --step export           # rebuild output from progress (no network)
+python3 source_metafield.py                      # ensure custom.source definition
+python3 source_metafield.py --backfill --dry-run # report source-tag counts
+# Net-new import (reuses sheet_import; create is GATED)
+python3 sheet_import.py --run-dir desco_imports/<date> --step match
+python3 sheet_import.py --run-dir desco_imports/<date> --step create --dry-run
+```

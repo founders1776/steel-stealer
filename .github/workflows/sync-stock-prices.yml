@@ -93,7 +93,8 @@ jobs:
                    competitor_prices.json bulk_import_progress.json \
                    missing_import_progress.json dual_source_skus.json \
                    dual_source_brands.json competitors.json reprice_brands.json \
-                   reprice_targets.json competitor_price_progress.json; do
+                   reprice_targets.json competitor_price_progress.json \
+                   desco_products.json desco_ingest_progress.json source_map.json; do
             [ -f "$f" ] && FILES="$FILES $f"
           done
           tar --sort=name --mtime='UTC 2020-01-01' --owner=0 --group=0 -czf data.tar.gz $FILES
