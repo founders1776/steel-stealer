@@ -3,7 +3,12 @@ name: Scrape Competitor Prices (Weekly)
 on:
   schedule:
     - cron: '0 2 * * 0'  # Every Sunday at 2am UTC
-  workflow_dispatch: {}   # Manual trigger button
+  workflow_dispatch:
+    inputs:
+      fresh:
+        description: 'Clear progress and re-scrape every SKU (full refresh, ignores cached prices)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -86,9 +91,16 @@ jobs:
           python build_reprice_targets.py
 
       - name: Scrape competitor prices (async)
+        env:
+          FRESH: ${{ github.event.inputs.fresh }}
         run: |
+          FRESH_FLAG=""
+          if [ "$FRESH" = "true" ]; then
+            FRESH_FLAG="--fresh"
+            echo "Fresh mode — clearing progress, re-scraping every SKU"
+          fi
           if python -c "import json,sys; d=json.load(open('competitors.json')); sys.exit(0 if d.get('competitors') else 1)" 2>/dev/null; then
-            python scrape_competitor_prices.py --budget-minutes 300
+            python scrape_competitor_prices.py --budget-minutes 300 $FRESH_FLAG
           else
             echo "No competitors.json with domains — skipping scrape"
           fi
