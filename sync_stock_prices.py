@@ -331,7 +331,8 @@ def run_reprice_targets(competitor_prices, price_locks, products, progress,
 
 
 def run_competitive_reprice(competitor_prices, price_locks, shopify_map, products,
-                            progress, changes, dry_run=False, up_only=False):
+                            progress, changes, dry_run=False, up_only=False,
+                            main_loop_skus=None):
     """General-catalog competitor-undercut pass (every part/accessory we sell).
 
     Candidate set = union of product_names.json + desco_products.json. A SKU is
@@ -379,12 +380,20 @@ def run_competitive_reprice(competitor_prices, price_locks, shopify_map, product
     log.info(f"Competitive reprice candidates: {len(candidates)} "
              f"({len(already)} already done this run)")
 
+    main_loop_skus = main_loop_skus or set()
     stats = {"repriced": 0, "no_variant": 0, "no_data": 0, "below_floor": 0,
-             "unchanged": 0, "locked": 0, "dual_source": 0}
+             "unchanged": 0, "locked": 0, "dual_source": 0, "deferred_to_main": 0}
     for sku, info in candidates.items():
         if sku in already:
             continue
         progress["competitive_repriced_skus"].append(sku)
+
+        # The Steel City main loop already priced these (fresh cost + competitor
+        # undercut) this run — don't double-write. Empty when login failed, so
+        # B then covers in-gate SKUs too as the competitive fallback.
+        if sku in main_loop_skus:
+            stats["deferred_to_main"] += 1
+            continue
 
         if sku in price_locks:
             stats["locked"] += 1
@@ -470,7 +479,8 @@ def run_competitive_reprice(competitor_prices, price_locks, shopify_map, product
     log.info(f"Competitive reprice: {stats['repriced']} repriced, "
              f"{stats['unchanged']} unchanged, {stats['no_data']} no competitor data, "
              f"{stats['no_variant']} no variant, {stats['locked']} MAP-locked, "
-             f"{stats['dual_source']} dual-source")
+             f"{stats['dual_source']} dual-source, "
+             f"{stats['deferred_to_main']} deferred to main loop")
 
 
 # ── Browser helpers (from check_stock.py) ───────────────────────────────────
@@ -919,7 +929,7 @@ def save_sync_progress(progress):
 
 # ── Main sync logic ────────────────────────────────────────────────────────
 
-def run_sync(driver, dry_run=False, reprice_only=False, up_only=False,
+def run_sync(dry_run=False, reprice_only=False, up_only=False,
              competitive_only=False):
     # Load data
     with open(PRODUCTS_FILE) as f:
@@ -1047,20 +1057,33 @@ def run_sync(driver, dry_run=False, reprice_only=False, up_only=False,
 
     changes = progress["changes"]
 
-    # Competitor-undercut pass for dual-source brand parts (SEBO etc.) —
-    # price-only, driven by reprice_targets.json, no Steel City involved.
+    # 1) Dual-source reprice (SEBO/Miele/Lindhaus) — always, no browser.
     run_reprice_targets(competitor_prices, price_locks, products, progress,
                         changes, dry_run=dry_run, up_only=up_only)
 
-    # General-catalog competitor reprice (all parts/accessories, both
-    # distributors). Price-only; skipped in legacy SEBO-only --reprice-only mode.
-    if not reprice_only:
-        run_competitive_reprice(competitor_prices, price_locks, shopify_map,
-                                products, progress, changes, dry_run=dry_run,
-                                up_only=up_only)
+    # 2) Steel City stock + cost pass needs the browser. Log in HERE (not in
+    #    main) so a Cloudflare-Turnstile failure only skips THIS pass — the
+    #    competitive pass (step 3, below the main loop) still runs. Competitive
+    #    pricing must not depend on the flaky portal login.
+    driver = None
+    main_loop_skus = set()
+    if not reprice_only and not competitive_only:
+        try:
+            driver = create_driver()
+            login(driver)
+            main_loop_skus = {s for _, s, _ in sync_skus}
+        except Exception as e:
+            log.warning(f"Steel City login/driver failed ({e}) — skipping "
+                        f"stock/cost pass; competitive pricing still runs")
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            driver = None
 
-    if reprice_only or competitive_only:
-        log.info("Price-only mode — skipping Steel City stock/price sync")
+    if driver is None:
+        log.info("No Steel City browser session — skipping stock/cost sync")
         remaining = []
 
     # Process in batches
@@ -1223,6 +1246,23 @@ def run_sync(driver, dry_run=False, reprice_only=False, up_only=False,
 
         time.sleep(random.uniform(0.3, 0.8))
 
+    # Done with the browser; the competitive pass below is HTTP-only.
+    if driver is not None:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        driver = None
+
+    # 3) General-catalog competitor reprice — always (unless SEBO-only mode).
+    #    Skips SKUs the main loop already owns (main_loop_skus) to avoid
+    #    double-writes; empty when the login failed, so B then covers in-gate
+    #    SKUs too as the competitive fallback.
+    if not reprice_only:
+        run_competitive_reprice(competitor_prices, price_locks, shopify_map,
+                                products, progress, changes, dry_run=dry_run,
+                                up_only=up_only, main_loop_skus=main_loop_skus)
+
     # Save final progress
     save_sync_progress(progress)
 
@@ -1350,25 +1390,16 @@ def main():
             print("ERROR: Set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN environment variables.")
             sys.exit(1)
 
-    price_only = args.reprice_only or args.competitive_reprice
-    driver = None
+    # run_sync owns the browser now: it logs in mid-run (non-fatal) so a
+    # Cloudflare failure only skips the Steel City pass, not the competitive one.
     try:
-        if not price_only:
-            driver = create_driver()
-            login(driver)
-        run_sync(driver, dry_run=args.dry_run, reprice_only=args.reprice_only,
+        run_sync(dry_run=args.dry_run, reprice_only=args.reprice_only,
                  up_only=args.up_only, competitive_only=args.competitive_reprice)
     except KeyboardInterrupt:
         log.info("\nInterrupted — progress saved. Re-run to resume.")
     except Exception as e:
         log.error(f"Error: {e}", exc_info=True)
         sys.exit(1)
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":

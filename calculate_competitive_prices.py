@@ -185,8 +185,6 @@ def main():
                 "method": "markup_no_data",
                 "old_retail": old_retail,
             }
-            if not args.dry_run:
-                products[key]["retail_price"] = f"${final_price:.2f}"
             continue
 
         # Validated competitor prices (rejects accessory/clone mismatches).
@@ -201,8 +199,6 @@ def main():
                 "method": "markup_no_valid_data",
                 "old_retail": old_retail,
             }
-            if not args.dry_run:
-                products[key]["retail_price"] = f"${final_price:.2f}"
             continue
 
         # Walk competitors low→high; undercut the cheapest beatable by $1 at the
@@ -227,11 +223,9 @@ def main():
             "old_retail": old_retail,
         }
 
-        if not args.dry_run:
-            products[key]["retail_price"] = f"${final_price:.2f}"
-            products[key]["competitor_price"] = f"${round(sum(valid_prices) / len(valid_prices), 2):.2f}"
-
-    # Output
+    # Report-only: the sync (run_competitive_reprice + main loop) owns
+    # product_names retail + the Shopify push. This script just emits the
+    # decision report (pricing_decisions.json) consumed by the weekly email.
     output = {
         "calculated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "stats": stats,
@@ -239,11 +233,7 @@ def main():
     }
 
     OUTPUT_FILE.write_text(json.dumps(output, indent=2))
-    log.info(f"\nSaved pricing decisions to {OUTPUT_FILE}")
-
-    if not args.dry_run:
-        PRODUCTS_FILE.write_text(json.dumps(products, indent=2))
-        log.info(f"Updated {PRODUCTS_FILE} with new retail prices")
+    log.info(f"\nSaved pricing decisions to {OUTPUT_FILE} (report-only; no Shopify/product_names writes)")
 
     # Summary
     log.info(f"\n{'='*50}")
