@@ -95,6 +95,7 @@ jobs:
           SC_ACCOUNT: ${{ secrets.SC_ACCOUNT }}
           SC_USER: ${{ secrets.SC_USER }}
           SC_PASSWORD: ${{ secrets.SC_PASSWORD }}
+          SC_PROXY: ${{ secrets.SC_PROXY }}
           RUN_MODE: ${{ github.event.inputs.mode || 'full' }}
         run: |
           if [ "$RUN_MODE" = "competitive-up-only" ]; then

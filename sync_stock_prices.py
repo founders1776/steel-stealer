@@ -490,11 +490,52 @@ def _detect_chrome_major():
     return None
 
 
+def _build_proxy_auth_extension(host, port, user, password):
+    """Chrome can't take inline proxy credentials on --proxy-server, so for an
+    authenticated (user:pass) residential proxy we load a tiny MV3 extension
+    that answers the auth challenge. Returns the extension dir, or None."""
+    import tempfile
+    ext_dir = tempfile.mkdtemp(prefix="sc_proxy_ext_")
+    manifest = {
+        "name": "sc-proxy-auth", "version": "1.0", "manifest_version": 3,
+        "permissions": ["proxy", "webRequest", "webRequestAuthProvider"],
+        "host_permissions": ["<all_urls>"],
+        "background": {"service_worker": "bg.js"},
+    }
+    bg = f"""
+chrome.webRequest.onAuthRequired.addListener(
+  () => ({{authCredentials: {{username: "{user}", password: "{password}"}}}}),
+  {{urls: ["<all_urls>"]}}, ["blocking"]
+);
+"""
+    with open(os.path.join(ext_dir, "manifest.json"), "w") as f:
+        json.dump(manifest, f)
+    with open(os.path.join(ext_dir, "bg.js"), "w") as f:
+        f.write(bg)
+    return ext_dir
+
+
 def create_driver():
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+
+    # Optional residential proxy (SC_PROXY) — GitHub's datacenter IP is blocked
+    # by Cloudflare Turnstile at Steel City login; a residential proxy passes it.
+    # Format: host:port  OR  http://user:pass@host:port
+    proxy = os.environ.get("SC_PROXY", "").strip()
+    if proxy:
+        from urllib.parse import urlparse
+        p = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+        if p.username and p.password:
+            ext = _build_proxy_auth_extension(p.hostname, p.port, p.username, p.password)
+            options.add_argument(f"--load-extension={ext}")
+            options.add_argument(f"--proxy-server={p.hostname}:{p.port}")
+        else:
+            options.add_argument(f"--proxy-server={p.hostname}:{p.port}")
+        log.info(f"Using residential proxy {p.hostname}:{p.port}")
+
     version = _detect_chrome_major()
     log.info(f"Detected Chrome version: {version}")
     return uc.Chrome(options=options, version_main=version)
