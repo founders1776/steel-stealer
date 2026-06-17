@@ -140,7 +140,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data.tar.gz.gpg .data-bundle.hash
           git commit -m "data: refresh encrypted bundle (run ${GITHUB_RUN_ID})"
-          git push
+          # Rebase before pushing — a concurrent commit (code change, the other
+          # workflow) otherwise rejects the push and the bundle update is LOST
+          # (happened run 27701409076). Retry a few times for safety.
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin main && git push && break
+            echo "push attempt $i failed — retrying"; sleep 5
+          done
 
       - name: Send email report
         if: always()
