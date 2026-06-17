@@ -377,27 +377,11 @@ Phase 3c: Automated Stock & Price Sync
     - PUT variant price only — never stock/status/inventory
     `--reprice-only` flag runs just this pass (no browser, fast)]
        |
-  [Competitive reprice pass — runs SECOND, no browser needed (skipped
-   only in legacy --reprice-only mode):
-    run_competitive_reprice — the WHOLE catalog, BOTH distributors.
-    Candidate set = product_names.json ∪ desco_products.json. Keep a
-    SKU when: has a Shopify variant + a dealer cost + validated
-    competitor data, AND not price-locked, AND not dual-source
-    (those are owned by the reprice_targets pass above). Genuine
-    pre-existing store products are excluded automatically (no entry
-    in product_names/desco → no cost). NOTE: this pass does NOT use
-    the bulk_import_progress ownership gate — data-ownership + cost +
-    competitor data is the gate (so ungated catalog SKUs like the
-    Hoover 440013719 harness finally get repriced).
-    Per SKU:
-    - undercut WALK: beat cheapest beatable competitor by $1
-    - margin gate = cost / 0.80 (20% gross); else tiered markup
-    - $6.99 store display floor = final clamp (NOT a margin gate)
-    - old price from product_names retail, else live Shopify GET
-      (Desco-only SKUs have no local retail)
-    - PUT variant price only (cost=None — never overwrite cost-per-item)
-    `--competitive-reprice` runs just this pass; `--up-only` (any run)
-    never lowers a known price — used for the first stale-data fix]
+  [Steel City login — NON-FATAL (2026-06-17): happens inside run_sync.
+   If Cloudflare Turnstile blocks it (~50% of CI runs), ONLY the main
+   loop below is skipped — the competitive reprice pass still runs.
+   Competitive pricing must not depend on the flaky portal login.
+   On success → main loop runs and records main_loop_skus.]
        |
   [Launch browser → login to Steel City → batch API calls (8 concurrent)]
        |
@@ -412,6 +396,22 @@ Phase 3c: Automated Stock & Price Sync
   [cost decreased → NO ACTION (protect margins)]
   [--up-only: never lower a listed price this run (cost-per-item may still
     correct upward)]
+       |
+  [Competitive reprice pass — runs LAST, no browser (always, unless legacy
+   --reprice-only): run_competitive_reprice — the WHOLE catalog, BOTH
+   distributors. Candidate set = product_names.json ∪ desco_products.json
+   with a Shopify variant + dealer cost + validated competitor data; minus
+   price_locks + dual-source (those = reprice_targets pass). Does NOT use the
+   bulk_import_progress gate — so ungated SKUs (e.g. Hoover 440013719) finally
+   get repriced.
+    - SKIPS main_loop_skus (the main loop already priced those off FRESH cost
+      this run) → no double-write. If login FAILED, main_loop_skus is empty so
+      this pass covers in-gate SKUs too (the competitive fallback).
+    - undercut WALK: beat cheapest beatable competitor by $1; margin gate =
+      cost/0.80 (20% gross); else markup tiers; $6.99 store floor = final clamp.
+    - PUT price only (cost=None). old price from product_names retail, else a
+      live Shopify GET (Desco-only SKUs have no local retail).
+    `--competitive-reprice` runs just this pass; `--up-only` never lowers.]
        |
   [Update product_names.json + append to sync_log.json]
        |
