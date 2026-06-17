@@ -2,11 +2,14 @@
 """
 Phase 4b: Scrape competitor prices for all products.
 
-All competitors are Shopify stores — uses /search/suggest.json API with
-async aiohttp for parallelization (30-50 concurrent requests per domain).
+All competitors are Shopify stores, so we pull each store's FULL catalog via the
+public /products.json endpoint (250/page, ?page=N) and match our SKUs LOCALLY
+against variants[].sku + titles. Domains are pulled concurrently.
 
-Previous version was sequential (28+ hours, always timed out on GitHub Actions).
-This version completes in ~30-60 minutes.
+This replaced per-SKU /search/suggest.json queries (~13k SKUs × ~12 stores ≈
+160k requests), which got anti-bot rate-limited to a crawl (17h for ~1.5 stores).
+The catalog approach is a few hundred requests total → no throttling, ~2 minutes
+for all competitors.
 
 Usage:
   python3 scrape_competitor_prices.py                           # Full run (all competitors)
@@ -48,9 +51,6 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-CONCURRENCY = 30  # max concurrent requests per domain
-BATCH_SIZE = 100  # checkpoint progress every N SKUs
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
@@ -67,14 +67,6 @@ ACCESSORY_INDICATORS = re.compile(
 
 def normalize_sku(sku):
     return re.sub(r'[\-\s\.]', '', sku).lower()
-
-
-def sku_matches(sku, text):
-    sku_lower = sku.lower()
-    text_lower = text.lower()
-    if sku_lower in text_lower:
-        return True
-    return normalize_sku(sku) in normalize_sku(text)
 
 
 def is_accessory_match(sku, title):
@@ -110,145 +102,106 @@ def parse_price_str(price_str):
     return float(match.group()) if match else None
 
 
-# ── Async Shopify Scraper ─────────────────────────────────────────────────────
+# ── Shopify catalog scraper (pull /products.json, match locally) ──────────────
+#
+# Every competitor is a Shopify store. Querying /search/suggest.json once per
+# SKU was ~13k SKUs × ~12 stores ≈ 160k requests → anti-bot rate-limited to a
+# crawl. Instead we pull each store's FULL catalog via the public
+# /products.json endpoint (250 products/page, tens-to-hundreds of requests per
+# store) and match our SKUs LOCALLY against variants[].sku + product titles.
+# ~300x fewer requests → no throttling, and far faster.
 
-async def fetch_suggest(session, sem, domain, sku, dealer_cost):
-    """Fetch suggest API + product.json for a single SKU.
-
-    Returns (sku, match_or_None, ok). ok=False means the REQUEST failed
-    (HTTP error, timeout, block) — the SKU was not actually checked and must
-    not be recorded in progress, or a blocking domain poisons the whole sweep
-    as "checked, no match".
-    """
-    base_url = f"https://{domain}"
-    suggest_url = f"{base_url}/search/suggest.json"
-
-    async with sem:
+async def fetch_catalog(session, domain, deadline=None):
+    """Page through a store's public /products.json with ?page=N (since_id is
+    silently ignored by many storefronts). Returns the full product list, or []
+    if the endpoint is closed/blocked. Stops at the first short/empty page."""
+    base = f"https://{domain}"
+    products = []
+    page = 1
+    for _ in range(4000):  # safety cap (~1M products)
+        if deadline and time.time() > deadline:
+            log.info(f"[{domain}] deadline hit at {len(products)} products")
+            break
+        url = f"{base}/products.json?limit=250&page={page}"
         try:
-            # Step 1: suggest API
-            params = {
-                "q": sku,
-                "resources[type]": "product",
-                "resources[limit]": 5,
-            }
-            async with session.get(suggest_url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 429:
-                    # Back off and retry once
-                    await asyncio.sleep(random.uniform(5, 10))
-                    async with session.get(suggest_url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp2:
-                        if resp2.status != 200:
-                            return (sku, None, False)
-                        data = await resp2.json(content_type=None)
-                elif resp.status != 200:
-                    return (sku, None, False)
-                else:
-                    data = await resp.json(content_type=None)
-
-            products_found = data.get("resources", {}).get("results", {}).get("products", [])
-
-            for p in products_found:
-                title = p.get("title", "")
-                url = p.get("url", "")
-                if not (sku_matches(sku, title) or sku_matches(sku, url)):
-                    continue
-                if is_accessory_match(sku, title):
-                    continue
-
-                # Step 2: fetch full product JSON for accurate price
-                product_url = f"{base_url}{url}.json"
-                try:
-                    async with session.get(product_url, timeout=aiohttp.ClientTimeout(total=15)) as prod_resp:
-                        if prod_resp.status != 200:
-                            continue
-                        prod_data = await prod_resp.json(content_type=None)
-                        variants = prod_data.get("product", {}).get("variants", [])
-                        if variants:
-                            price = parse_price_str(variants[0].get("price"))
-                            if price and price > 0 and price_is_sane(price, dealer_cost):
-                                return (sku, {
-                                    "price": price,
-                                    "url": f"{base_url}{url}",
-                                    "title": title,
-                                }, True)
-                except Exception:
-                    continue
-
-            return (sku, None, True)
-
-        except asyncio.TimeoutError:
-            return (sku, None, False)
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    if not products:
+                        log.warning(f"[{domain}] /products.json HTTP {resp.status}")
+                    break
+                data = await resp.json(content_type=None)
         except Exception as e:
-            log.debug(f"[{domain}] Error for {sku}: {e}")
-            return (sku, None, False)
+            log.warning(f"[{domain}] catalog page {page} failed: {e}")
+            break
+        batch = data.get("products", [])
+        if not batch:
+            break
+        products.extend(batch)
+        if len(batch) < 250:   # last page
+            break
+        page += 1
+        await asyncio.sleep(random.uniform(0.3, 0.8))  # polite between pages
+    return products
 
 
-async def scrape_shopify_async(domain, skus_with_products, progress_key, progress,
-                               limit=0, deadline=None):
-    """Scrape a Shopify competitor with async concurrent requests.
-
-    Returns True if the time budget (deadline) was hit mid-domain.
-    """
-    work = [(sku, prod) for sku, prod in skus_with_products if sku not in progress.get(progress_key, {})]
-    if limit:
-        work = work[:limit]
-
-    if not work:
-        log.info(f"[{domain}] No work remaining (all SKUs already checked)")
-        return False
-
-    log.info(f"[{domain}] Async scraper: {len(work)} SKUs, concurrency={CONCURRENCY}")
-    sem = asyncio.Semaphore(CONCURRENCY)
-    errors = 0
-    attempted = 0
-
-    connector = aiohttp.TCPConnector(limit=CONCURRENCY, limit_per_host=CONCURRENCY)
-    async with aiohttp.ClientSession(headers=HEADERS, connector=connector) as session:
-        # Process in batches for checkpointing
-        for batch_start in range(0, len(work), BATCH_SIZE):
-            if deadline and time.time() > deadline:
-                log.info(f"[{domain}] Time budget reached — progress saved, "
-                         f"next run resumes here")
-                return True
-            batch = work[batch_start:batch_start + BATCH_SIZE]
-            tasks = []
-            for sku, product in batch:
-                dealer_cost = parse_price_str(product.get("price"))
-                tasks.append(fetch_suggest(session, sem, domain, sku, dealer_cost))
-
-            batch_results = await asyncio.gather(*tasks)
-
-            for sku, match, ok in batch_results:
-                attempted += 1
-                if not ok:
-                    # Request failed (block/timeout) — leave the SKU
-                    # unrecorded so a later run actually checks it.
-                    errors += 1
+def match_catalog(domain, products, our_index):
+    """Match a store's catalog against our SKUs. our_index: normalized SKU →
+    (our_sku, dealer_cost). Returns {our_sku: {price, url, title}}, keeping the
+    LOWEST sane price per SKU."""
+    base = f"https://{domain}"
+    found = {}
+    for p in products:
+        title = p.get("title", "") or ""
+        handle = p.get("handle", "")
+        url = f"{base}/products/{handle}"
+        for v in p.get("variants", []):
+            price = parse_price_str(v.get("price"))
+            if not price or price <= 0:
+                continue
+            # Candidate normalized SKU keys: the variant.sku plus tokens from
+            # sku+title (stores with messy sku fields still match by title).
+            vsku = v.get("sku") or ""
+            candidates = set()
+            if vsku:
+                candidates.add(normalize_sku(vsku))
+            for tok in re.split(r'[\s,/|;]+', f"{vsku} {title}"):
+                ntok = normalize_sku(tok)
+                if len(ntok) >= 4:   # skip tiny ambiguous tokens
+                    candidates.add(ntok)
+            for ncs in candidates:
+                hit = our_index.get(ncs)
+                if not hit:
                     continue
-                progress.setdefault(progress_key, {})[sku] = match
+                our_sku, dealer_cost = hit
+                if is_accessory_match(our_sku, title):
+                    continue
+                if not price_is_sane(price, dealer_cost):
+                    continue
+                prev = found.get(our_sku)
+                if prev is None or price < prev["price"]:
+                    found[our_sku] = {"price": price, "url": url, "title": title}
+                break
+    return found
 
-            # Circuit breaker: a domain that rejects (almost) everything is
-            # blocking this runner — burning the time budget on it poisons
-            # nothing now, but wastes the whole run. Move on.
-            if attempted >= 300 and errors / attempted > 0.90:
-                log.warning(f"[{domain}] {errors}/{attempted} requests failed — "
-                            f"domain appears to be blocking, skipping this run")
-                save_progress(progress)
-                return False
 
-            # Checkpoint
+async def scrape_shopify_catalog(domain, our_index, progress, save_lock=None, deadline=None):
+    """Pull a store's catalog and record SKU matches in progress[domain]."""
+    connector = aiohttp.TCPConnector(limit=4, limit_per_host=4)
+    async with aiohttp.ClientSession(headers=HEADERS, connector=connector) as session:
+        products = await fetch_catalog(session, domain, deadline=deadline)
+    if not products:
+        log.warning(f"[{domain}] no catalog retrieved — skipping")
+        return
+    matches = match_catalog(domain, products, our_index)
+    dom = progress.setdefault(domain, {})
+    dom.clear()
+    dom.update(matches)
+    if save_lock is not None:
+        async with save_lock:
             save_progress(progress)
-            done = batch_start + len(batch)
-            matched = sum(1 for v in progress.get(progress_key, {}).values() if v)
-            total_checked = len(progress.get(progress_key, {}))
-            log.info(f"[{domain}] {done}/{len(work)} done | "
-                     f"total checked: {total_checked} | matched: {matched} "
-                     f"({100 * matched // max(total_checked, 1)}%) | "
-                     f"request errors this run: {errors}")
-
-            # Small pause between batches to be polite
-            await asyncio.sleep(random.uniform(1.0, 2.0))
-
-    return False
+    else:
+        save_progress(progress)
+    log.info(f"[{domain}] catalog: {len(products)} products → {len(matches)} SKU matches")
 
 
 # ── Progress ──────────────────────────────────────────────────────────────────
@@ -266,31 +219,27 @@ def save_progress(progress):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def run_scrape(competitors, skus_with_products, progress, limit=0, deadline=None):
-    """Run the async scraper for all competitors."""
-    for comp in competitors:
-        domain = comp["domain"]
-        progress_key = domain
+    """Pull every competitor's full Shopify catalog CONCURRENTLY and match our
+    SKUs locally. Few hundred requests total instead of ~160k per-SKU queries,
+    so no rate-limiting and wall-clock ≈ the slowest single catalog. A shared
+    lock serializes progress saves; a closed/blocked /products.json is skipped
+    without stalling the rest."""
+    our_index = {}
+    for sku, prod in skus_with_products:
+        our_index[normalize_sku(sku)] = (sku, parse_price_str(prod.get("price")))
 
-        already_done = len(progress.get(progress_key, {}))
-        if already_done >= len(skus_with_products) and not limit:
-            log.info(f"[{domain}] Already complete ({already_done} SKUs). Skipping.")
-            continue
+    save_lock = asyncio.Lock()
+    domains = [c["domain"] for c in competitors]
+    log.info(f"Pulling {len(domains)} competitor catalogs concurrently; "
+             f"matching {len(our_index)} of our SKUs locally")
 
-        log.info(f"\n{'=' * 60}")
-        log.info(f"Scraping: {domain}")
-        log.info(f"{'=' * 60}")
+    async def _one(domain):
+        try:
+            await scrape_shopify_catalog(domain, our_index, progress, save_lock, deadline)
+        except Exception as e:
+            log.warning(f"[{domain}] failed: {e}")
 
-        budget_hit = await scrape_shopify_async(
-            domain, skus_with_products, progress_key, progress, limit, deadline)
-
-        save_progress(progress)
-        if budget_hit:
-            log.info("Stopping sweep for this run — remaining domains resume next run")
-            break
-        matched = sum(1 for v in progress.get(progress_key, {}).values() if v)
-        total = len(progress.get(progress_key, {}))
-        log.info(f"[{domain}] Complete: {total} checked, {matched} matched "
-                 f"({100 * matched // max(total, 1)}%)")
+    await asyncio.gather(*(_one(d) for d in domains))
 
 
 def main():
